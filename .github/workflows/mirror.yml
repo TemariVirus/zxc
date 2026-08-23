@@ -4,8 +4,8 @@ on:
     branches:
         - __mirror
   schedule:
-    # Run everyday at 3 AM UTC
-    - cron: '0 3 * * *'
+    # Run everyday at 4 AM UTC
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: mirror
         id: mirror
-        uses: bridgelightcloud/github-mirror-action@v3
+        uses: bridgelightcloud/github-mirror-action@e5620f9dfa4217be90d7a2bfc4c5b4256df8334f
         with:
-          origin: ''
+          origin: 'https://codeberg.org/TemariVirus/zxc'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
