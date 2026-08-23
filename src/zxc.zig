@@ -187,27 +187,24 @@ fn lsCmd(
         return lsAll(allocator, io, base_dir, &stdout.interface);
     }
 
-    const versions_dir = base_dir.openDir(io, files.VERSIONS_DIR, .{ .iterate = true }) catch |err|
-        fatal("Unable to open versions folder: {t}", .{err});
-    defer versions_dir.close(io);
-    var version_iter: files.InstalledZigIterator = .init(versions_dir);
-    var empty = true;
-    while (version_iter.next(io)) |version| {
-        empty = false;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    // Pass empty index to only get installed versions
+    const versions = files.getAllVersions(arena.allocator(), io, base_dir, "{}") catch |err| switch (err) {
+        error.OutOfMemory => fatal("Out of memory", .{}),
+        error.UnexpectedFormat => unreachable,
+        else => fatal("Unable to open versions folder: {t}", .{err}),
+    };
+    std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
 
-        var master_ver_buf: [64]u8 = undefined;
-        const master_ver = if (std.mem.eql(u8, version, "master"))
-            files.installedMasterVersion(io, versions_dir, &master_ver_buf)
-        else
-            null;
-        if (master_ver) |mv| {
-            stdout.interface.print("{s} ({s})\n", .{ version, mv }) catch {};
-        } else {
-            stdout.interface.print("{s}\n", .{version}) catch {};
-        }
-    }
-    if (empty) {
+    if (versions.len == 0) {
         stdout.interface.writeAll("No Zig versions installed.\n") catch {};
+    } else for (versions) |v| {
+        if (v.version) |ver| {
+            stdout.interface.print("{s} ({s})\n", .{ v.name, ver }) catch {};
+        } else {
+            stdout.interface.print("{s}\n", .{v.name}) catch {};
+        }
     }
     stdout.flush() catch {};
 }
