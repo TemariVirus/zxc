@@ -1,0 +1,27 @@
+.{
+    .name = .zxc,
+    .version = "0.0.0",
+    .fingerprint = 0x957af788fc19542d, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0-dev.1737+de207594e",
+    .dependencies = .{
+        .known_folders = .{
+            .url = "git+https://github.com/ziglibs/known-folders.git#6da0d0c41b78b9ed2d34fa364fcb81b5ebece6c4",
+            .hash = "known_folders-0.0.0-Fy-PJiDLAAB98m3uYUzatrTb2mO2fpvwx2zpSroEtfbO",
+        },
+        .lexopts = .{
+            .url = "git+https://codeberg.org/lukeflo/lexopts.git#642ce08ec4f123dc10042fc4d74ff5509b66f7ae",
+            .hash = "lexopts-0.6.0-Zs2TZgNXAAA-KhaectXNnnjzMPLUEB2GqP5dMC04IO0_",
+        },
+        .minizign = .{
+            .url = "git+https://github.com/jedisct1/zig-minisign.git#687934fcda635b5b3f7126393f504798c097171c",
+            .hash = "minizign-0.1.13-gg18ccIgAQARQbGwRORAQh24IB-H8eIzlrV0-ll18Va0",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
