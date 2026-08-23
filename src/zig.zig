@@ -5,8 +5,10 @@ const Dir = Io.Dir;
 const Rng = std.Random.ChaCha;
 const fatal = std.process.fatal;
 
+const KeyReader = @import("KeyReader.zig");
 const files = @import("files.zig");
 const http = @import("http.zig");
+const term = @import("term.zig");
 
 /// Installs the zig version into `versions_dir`.
 /// The comparessed tarball is temporarily stored in `tmp_dir`.
@@ -109,16 +111,91 @@ fn getZigVersionFromBuildZigZon(
     return zon.minimum_zig_version;
 }
 
-fn userSelectZigVersion(
+fn cleanupVersionMenu(stdout: *Io.Writer, kr: KeyReader) void {
+    term.setCursorVisibility(stdout, true) catch {};
+    term.previousLine(stdout, 2) catch {}; // Instruction text takes up 2 lines
+    term.erase(stdout, .after_cursor) catch {};
+    stdout.flush() catch {};
+    kr.deinit();
+}
+
+fn selectVersionMenu(
+    allocator: std.mem.Allocator,
+    io: Io,
     index: []const u8,
-    stdin: *Io.File.Reader,
+    base_dir: Dir,
     stdout: *Io.Writer,
 ) struct { []const u8, bool } {
-    _ = stdin; // autofix
-    _ = index; // autofix
-    stdout.writeAll("Select Zig version:\n") catch {};
-    stdout.flush() catch {};
-    @panic("TODO: ask user to pick zig version");
+    // TODO: error if this is not an interative terminal
+    const MAX_MENU_HEIGHT = 10;
+
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const versions = files.getAllVersions(arena.allocator(), io, base_dir, index) catch |err| switch (err) {
+        error.OutOfMemory => fatal("Out of memory", .{}),
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        else => fatal("Unable to open versions folder: {t}", .{err}),
+    };
+    std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
+
+    const kr = KeyReader.init() catch |err| fatal("Unable to set up CLI menu: {t}", .{err});
+    defer cleanupVersionMenu(stdout, kr);
+
+    term.setCursorVisibility(stdout, false) catch {};
+    stdout.writeAll(
+        \\Use arrow keys to move, and press ENTER to confirm.
+        \\Select Zig version:
+        \\
+    ) catch {};
+    const menu_height = @min(MAX_MENU_HEIGHT, versions.len);
+    var choice: usize = 0;
+    while (true) {
+        const top_margin = (menu_height / 2);
+        const bottom_margin = ((menu_height + 1) / 2);
+        const menu_start, const menu_end = if (choice < top_margin)
+            .{ 0, menu_height }
+        else if (choice > versions.len - bottom_margin)
+            .{ versions.len - menu_height, versions.len }
+        else
+            .{ choice - top_margin, choice + bottom_margin };
+
+        term.erase(stdout, .after_cursor) catch {};
+        for (menu_start..menu_end) |i| {
+            if (i == choice) {
+                stdout.writeAll("> ") catch {};
+            } else {
+                stdout.writeAll("  ") catch {};
+            }
+            stdout.print("{f}\n", .{versions[i]}) catch {};
+        }
+        if (menu_end < versions.len) {
+            stdout.writeAll("  ...\n") catch {};
+            term.previousLine(stdout, 1) catch {};
+        }
+        term.previousLine(stdout, menu_height) catch {};
+        stdout.flush() catch {};
+
+        const key = kr.read() catch |err| {
+            cleanupVersionMenu(stdout, kr);
+            fatal("Unable to read user input: {t}", .{err});
+        };
+        switch (key) {
+            .up => choice = (choice + versions.len - 1) % versions.len,
+            .down => choice = (choice + 1) % versions.len,
+            .enter => break,
+            .sigterm => {
+                cleanupVersionMenu(stdout, kr);
+                std.process.exit(0);
+            },
+        }
+    }
+
+    const chosen = allocator.dupe(u8, versions[choice].name) catch {
+        cleanupVersionMenu(stdout, kr);
+        fatal("Out of memory", .{});
+    };
+    errdefer allocator.free(chosen);
+    return .{ chosen, versions[choice].installed };
 }
 
 /// Tries to detect the required zig version based on the current working directory.
@@ -154,8 +231,7 @@ fn detectZigVersion(allocator: std.mem.Allocator, io: Io, stdout: *Io.Writer) ?[
     while (true) {
         const cwd = Dir.path.dirname(path) orelse unreachable;
         const parent = Dir.path.dirname(cwd) orelse {
-            stdout.writeAll("No build.zig.zon found.\n") catch {};
-            stdout.flush() catch {};
+            log.info("No build.zig.zon found.", .{});
             return null;
         };
         @memcpy(path[parent.len + 1 ..][0..filename.len], filename);
@@ -163,8 +239,7 @@ fn detectZigVersion(allocator: std.mem.Allocator, io: Io, stdout: *Io.Writer) ?[
 
         if (getZigVersionFromBuildZigZon(allocator, io, path) catch |err| switch (err) {
             error.ParseZon => {
-                stdout.writeAll("Failed to detect Zig version from build.zig.zon.\n") catch {};
-                stdout.flush() catch {};
+                log.warn("Failed to detect Zig version from build.zig.zon.", .{});
                 return null;
             },
             else => fatal("Failed to parse build.zig.zon: {t}", .{err}),
@@ -188,16 +263,16 @@ fn getCompatibleZigVersion(index: []const u8, version: []const u8) ?[]const u8 {
         fatal("Unexpected format for index file. Please update your zxc version.", .{})) |entry|
     {
         if (wanted_semver) |wanted| {
-            const online = SemVer.parse(entry.alt_version orelse entry.version) catch continue;
+            const online = SemVer.parse(entry.version orelse entry.name) catch continue;
             if (wanted.major != online.major or wanted.minor != online.minor) continue;
             // Prefer newer versions
             if (compatible_version) |prev| {
                 if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
             }
-            compatible_version = entry.version;
+            compatible_version = entry.name;
         } else {
-            if (std.mem.eql(u8, version, entry.version)) return version;
-            if (entry.alt_version) |v| if (std.mem.eql(u8, version, v)) return version;
+            if (std.mem.eql(u8, version, entry.name)) return version;
+            if (entry.version) |v| if (std.mem.eql(u8, version, v)) return version;
         }
     }
 
@@ -271,7 +346,11 @@ pub fn main(init: std.process.Init) void {
         const v = detectZigVersion(gpa, io, &stdout.interface) orelse {
             index = files.getIndex(arena.allocator(), io, &client, base_dir) catch |err|
                 fatal("Failed to get index: {t}", .{err});
-            break :ver userSelectZigVersion(index.?, &stdin, &stdout.interface);
+
+            const ver, const installed = selectVersionMenu(gpa, io, index.?, base_dir, &stdout.interface);
+            defer gpa.free(ver);
+            const version = arena.allocator().dupe(u8, ver) catch fatal("Out of memory", .{});
+            break :ver .{ version, installed };
         };
         defer gpa.free(v);
         const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});

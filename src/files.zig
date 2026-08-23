@@ -51,6 +51,45 @@ pub const TarballInfo = struct {
     size: u64,
 };
 
+pub const ZigVersion = struct {
+    /// The name that would be used in the versions directory.
+    name: []const u8,
+    /// The zig version. If `null`, the version is the same as `name`.
+    version: ?[]const u8,
+    installed: bool,
+
+    fn orderMaybeSemanticVersion(lhs: []const u8, rhs: []const u8) std.math.Order {
+        blk: {
+            const l = std.SemanticVersion.parse(lhs) catch break :blk;
+            const r = std.SemanticVersion.parse(rhs) catch break :blk;
+            return l.order(r);
+        }
+        return std.mem.order(u8, lhs, rhs);
+    }
+
+    /// Returns whether `lhs` comes after `rhs` in a sorted array.
+    pub fn greaterThan(_: void, lhs: ZigVersion, rhs: ZigVersion) bool {
+        switch (orderMaybeSemanticVersion(lhs.name, rhs.name)) {
+            .lt => return false,
+            .eq => {},
+            .gt => return true,
+        }
+        if (rhs.version == null) return false;
+        if (lhs.version == null) return true;
+        return orderMaybeSemanticVersion(lhs.version.?, rhs.version.?) == .gt;
+    }
+
+    pub fn format(self: ZigVersion, writer: *Io.Writer) Io.Writer.Error!void {
+        writer.writeAll(self.name) catch {};
+        if (self.version) |ver| {
+            writer.print(" ({s})", .{ver}) catch {};
+        }
+        if (self.installed) {
+            writer.writeAll(" [Installed]") catch {};
+        }
+    }
+};
+
 /// Iterates through the Zig versions in the index.
 pub const IndexIterator = struct {
     stack_buf: [INDEX_JSON_STACK_SIZE]u8,
@@ -61,8 +100,8 @@ pub const IndexIterator = struct {
     pub const Error = error{UnexpectedFormat};
 
     pub const Entry = struct {
-        version: []const u8,
-        alt_version: ?[]const u8,
+        name: []const u8,
+        version: ?[]const u8,
     };
 
     pub fn init(self: *IndexIterator, index: []const u8) Error!void {
@@ -76,13 +115,13 @@ pub const IndexIterator = struct {
 
     pub fn next(self: *IndexIterator) Error!?Entry {
         while (true) switch (self.scanner.next() catch unreachable) {
-            .string => |version| {
+            .string => |name| {
                 switch (self.scanner.next() catch unreachable) {
                     .object_begin => {},
                     else => return Error.UnexpectedFormat,
                 }
                 // "version" is always the first key if it exists
-                const alt_version = json.parseValueIfEqlKey([]const u8, &self.scanner, "version") catch |err| switch (err) {
+                const version = json.parseValueIfEqlKey([]const u8, &self.scanner, "version") catch |err| switch (err) {
                     error.NoMoreKeys => continue,
                     error.UnexpectedToken => return Error.UnexpectedFormat,
                     else => unreachable,
@@ -94,7 +133,7 @@ pub const IndexIterator = struct {
 
                 self.scanner.skipValue() catch unreachable;
                 json.skipToEndOfObject(&self.scanner) catch unreachable;
-                return .{ .version = version, .alt_version = alt_version };
+                return .{ .name = name, .version = version };
             },
             .object_end, .end_of_document => return null,
             else => unreachable,
@@ -106,20 +145,13 @@ pub const IndexIterator = struct {
 pub const InstalledZigIterator = struct {
     dir_iter: Dir.Iterator,
 
-    pub fn init(io: Io, base_dir: Dir) InstalledZigIterator {
-        const versions_dir = base_dir.createDirPathOpen(io, VERSIONS_DIR, .{
-            .open_options = .{ .iterate = true },
-        }) catch |err| fatal("Unable to open versions folder: {t}", .{err});
+    /// `versions_dir` must be opened with `.iterate = true`
+    pub fn init(versions_dir: Dir) InstalledZigIterator {
         return .{ .dir_iter = versions_dir.iterate() };
     }
 
     pub fn versionsDir(self: InstalledZigIterator) Dir {
         return self.dir_iter.reader.dir;
-    }
-
-    pub fn deinit(self: *InstalledZigIterator, io: Io) void {
-        self.versionsDir().close(io);
-        self.* = undefined;
     }
 
     pub fn next(self: *InstalledZigIterator, io: Io) ?[]const u8 {
@@ -132,10 +164,21 @@ pub const InstalledZigIterator = struct {
         }
         return null;
     }
+
+    /// Adds all installed versions into the set.
+    /// Added versions are not freed on error.
+    pub fn collectSet(io: Io, versions_dir: Dir, set: *std.StringHashMap(void)) Allocator.Error!void {
+        var iter: InstalledZigIterator = .init(versions_dir);
+        while (iter.next(io)) |version| {
+            const name = try set.allocator.dupe(u8, version);
+            errdefer set.allocator.free(name);
+            try set.put(name, {});
+        }
+    }
 };
 
 /// Returns whether the given Zig version is installed in `versions_dir`.
-pub fn isZigVersionInstalled(io: std.Io, versions_dir: Dir, version: []const u8) bool {
+pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) bool {
     var path_buf: [Dir.max_name_bytes + 1 + ZIG_NAME.len]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
     const path = Dir.path.join(fba.allocator(), &.{ version, ZIG_NAME }) catch return false;
@@ -145,7 +188,7 @@ pub fn isZigVersionInstalled(io: std.Io, versions_dir: Dir, version: []const u8)
 
 /// Returns the actual version of "master" if it is installed, or `null` otherwise.
 /// `buffer` is used to store the result.
-pub fn installedMasterVersion(io: std.Io, versions_dir: Dir, buffer: []u8) ?[]const u8 {
+pub fn installedMasterVersion(io: Io, versions_dir: Dir, buffer: []u8) ?[]const u8 {
     // TODO: replace when spawnPath is implemented
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
@@ -156,9 +199,9 @@ pub fn installedMasterVersion(io: std.Io, versions_dir: Dir, buffer: []u8) ?[]co
     ) catch return null;
     var zig_proc = std.process.spawn(io, .{
         .argv = &.{ path, "version" },
-        .stdin = .close,
+        .stdin = .ignore,
         .stdout = .pipe,
-        .stderr = .close,
+        .stderr = .ignore,
     }) catch return null;
     defer zig_proc.kill(io);
 
@@ -170,6 +213,72 @@ pub fn installedMasterVersion(io: std.Io, versions_dir: Dir, buffer: []u8) ?[]co
         }});
         return null;
     };
+}
+
+/// Returns all Zig verisons, both installed and online, without duplicates.
+/// An arena-style allocator must be used.
+pub fn getAllVersions(
+    allocator: Allocator,
+    io: Io,
+    base_dir: Dir,
+    index: []const u8,
+) ![]ZigVersion {
+    const versions_dir = try base_dir.openDir(io, VERSIONS_DIR, .{ .iterate = true });
+    defer versions_dir.close(io);
+
+    var installed: std.StringHashMap(void) = .init(allocator);
+    try InstalledZigIterator.collectSet(io, versions_dir, &installed);
+
+    const master_ver_buf = try allocator.alloc(u8, 64);
+    const master_ver = if (installed.contains("master"))
+        installedMasterVersion(io, versions_dir, master_ver_buf)
+    else
+        null;
+
+    return getAllVersionsInner(allocator, master_ver, index, installed);
+}
+
+/// Returns all Zig verisons, both installed and online, without duplicates.
+/// Strings inside the result point inside `master_ver`, `index` and `installed_names`,
+/// rather than being allocated seperately.
+pub fn getAllVersionsInner(
+    allocator: Allocator,
+    master_ver: ?[]const u8,
+    index: []const u8,
+    installed_names: std.StringHashMap(void),
+) ![]ZigVersion {
+    var versions: std.ArrayList(ZigVersion) = .empty;
+    errdefer versions.deinit(allocator);
+
+    var installed_iter = installed_names.keyIterator();
+    while (installed_iter.next()) |name| {
+        try versions.append(allocator, .{
+            .name = name.*,
+            .version = if (std.mem.eql(u8, name.*, "master")) master_ver else null,
+            .installed = true,
+        });
+    }
+
+    var index_iter: IndexIterator = undefined;
+    try index_iter.init(index);
+    while (try index_iter.next()) |entry| {
+        if (installed_names.contains(entry.name)) {
+            if (!std.mem.eql(u8, entry.name, "master")) continue;
+            if (master_ver != null and
+                entry.version != null and
+                std.mem.eql(u8, master_ver.?, entry.version.?)) continue;
+        }
+        try versions.append(allocator, .{
+            .name = entry.name,
+            .version = if (entry.version != null and !std.mem.eql(u8, entry.name, entry.version.?))
+                entry.version.?
+            else
+                null,
+            .installed = false,
+        });
+    }
+
+    return versions.toOwnedSlice(allocator);
 }
 
 /// Opens and returns zxc's base directory.

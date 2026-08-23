@@ -148,28 +148,6 @@ fn lsAll(
     base_dir: Io.Dir,
     stdout: *Io.Writer,
 ) void {
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    defer arena.deinit();
-
-    var installed: std.StringHashMap(void) = .init(arena.allocator());
-    defer installed.deinit();
-    var master_ver_buf: [64]u8 = undefined;
-    const master_ver = blk: {
-        var version_iter: files.InstalledZigIterator = .init(io, base_dir);
-        defer version_iter.deinit(io);
-        const master_ver = files.installedMasterVersion(io, version_iter.versionsDir(), &master_ver_buf);
-
-        while (version_iter.next(io)) |version| (inner: {
-            installed.put(
-                arena.allocator().dupe(u8, version) catch |err| break :inner err,
-                {},
-            ) catch |err| break :inner err;
-        } catch {
-            log.warn("Too many installed versions, not all may be correctly listed as installed", .{});
-        });
-        break :blk master_ver;
-    };
-
     const index = blk: {
         var client: std.http.Client = .{ .allocator = allocator, .io = io };
         defer client.deinit();
@@ -178,32 +156,16 @@ fn lsAll(
     };
     defer allocator.free(index);
 
-    var index_iter: files.IndexIterator = undefined;
-    index_iter.init(index) catch
-        fatal("Unexpected format for index file. Please update your zxc version.", .{});
-    while (index_iter.next() catch
-        fatal("Unexpected format for index file. Please update your zxc version.", .{})) |entry|
-    {
-        // Is master already installed, and is it a different version from this entry?
-        const is_masters_clobber =
-            master_ver != null and
-            entry.alt_version != null and
-            std.mem.eql(u8, entry.version, "master") and
-            !std.mem.eql(u8, master_ver.?, entry.alt_version.?);
-
-        stdout.writeAll(entry.version) catch {};
-        if (entry.alt_version) |alt| if (!std.mem.eql(u8, entry.version, alt)) {
-            stdout.print(" ({s})", .{alt}) catch {};
-        };
-        if (installed.contains(entry.version) and !is_masters_clobber) {
-            stdout.writeAll(" [Installed]") catch {};
-        }
-        stdout.writeAll("\n") catch {};
-
-        // Print installed master below index master, as index master is always more recent
-        if (is_masters_clobber) {
-            stdout.print("master ({s}) [Installed]\n", .{master_ver.?}) catch {};
-        }
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const versions = files.getAllVersions(arena.allocator(), io, base_dir, index) catch |err| switch (err) {
+        error.OutOfMemory => fatal("Out of memory", .{}),
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        else => fatal("Unable to open versions folder: {t}", .{err}),
+    };
+    std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
+    for (versions) |v| {
+        stdout.print("{f}\n", .{v}) catch {};
     }
     stdout.flush() catch {};
 }
@@ -225,15 +187,17 @@ fn lsCmd(
         return lsAll(allocator, io, base_dir, &stdout.interface);
     }
 
-    var version_iter: files.InstalledZigIterator = .init(io, base_dir);
-    defer version_iter.deinit(io);
+    const versions_dir = base_dir.openDir(io, files.VERSIONS_DIR, .{ .iterate = true }) catch |err|
+        fatal("Unable to open versions folder: {t}", .{err});
+    defer versions_dir.close(io);
+    var version_iter: files.InstalledZigIterator = .init(versions_dir);
     var empty = true;
     while (version_iter.next(io)) |version| {
         empty = false;
 
         var master_ver_buf: [64]u8 = undefined;
         const master_ver = if (std.mem.eql(u8, version, "master"))
-            files.installedMasterVersion(io, version_iter.versionsDir(), &master_ver_buf)
+            files.installedMasterVersion(io, versions_dir, &master_ver_buf)
         else
             null;
         if (master_ver) |mv| {
