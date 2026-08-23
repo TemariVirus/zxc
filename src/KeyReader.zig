@@ -7,7 +7,7 @@ pub const Key = enum {
     enter,
     up,
     down,
-    sigterm,
+    sigint,
 };
 
 const KeyReader = @This();
@@ -52,7 +52,7 @@ pub fn read(self: KeyReader) !Key {
     };
     loop: switch (State.empty) {
         .empty => switch (try self.takeByte()) {
-            0x03 => return .sigterm,
+            0x03 => return .sigint,
             0x1b => continue :loop .esc,
             '\n' => return .enter,
             else => continue :loop .empty,

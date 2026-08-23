@@ -183,9 +183,9 @@ fn selectVersionMenu(
             .up => choice = (choice + versions.len - 1) % versions.len,
             .down => choice = (choice + 1) % versions.len,
             .enter => break,
-            .sigterm => {
+            .sigint => {
                 cleanupVersionMenu(stdout, kr);
-                std.process.exit(0);
+                std.process.exit(130); // Typical for dying by SIGINT
             },
         }
     }
