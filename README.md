@@ -23,6 +23,11 @@ For convenience, you probably also want to move the binaries to somewhere inside
 zxc is comprised of 2 binaries: `zig` and `zxc`.
 
 `zig` is a drop-in replacement for your regular Zig. It runs the appropriate Zig version upon startup.
+As it contains interactive prompts to get default Zig versions and confirm installations,
+it also supports environment variables for answering these prompts in non-interactive environments (they are ignored in interactive environments):
+
+- `ZXC_DEFAULT_ZIG_VERSION` - The Zig version to use when it cannot be automatically detected.
+- `ZXC_ALWAYS_INSTALL` - If non-empty, new Zig versions are always installed.
 
 `zxc` is a CLI tool for managing installed Zig versions. This includes: adding, listing, and removing Zig versions.
 More detailed help can be viewed by running `zxc --help`.

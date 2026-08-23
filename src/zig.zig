@@ -10,6 +10,16 @@ const files = @import("files.zig");
 const http = @import("http.zig");
 const term = @import("term.zig");
 
+const EnvVars = struct {
+    pub const DEFAULT_ZIG_VERSION = "ZXC_DEFAULT_ZIG_VERSION";
+    pub const ALWAYS_INSTALL = "ZXC_ALWAYS_INSTALL";
+
+    pub fn getNonEmpty(environ: *const std.process.Environ.Map, key: []const u8) ?[]const u8 {
+        const value = environ.get(key) orelse return null;
+        return if (value.len == 0) null else value;
+    }
+};
+
 /// Installs the zig version into `versions_dir`.
 /// The comparessed tarball is temporarily stored in `tmp_dir`.
 fn installZig(
@@ -126,7 +136,6 @@ fn selectVersionMenu(
     base_dir: Dir,
     stdout: *Io.Writer,
 ) struct { []const u8, bool } {
-    // TODO: error if this is not an interative terminal
     const MAX_MENU_HEIGHT = 10;
 
     var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -279,6 +288,30 @@ fn getCompatibleZigVersion(index: []const u8, version: []const u8) ?[]const u8 {
     return compatible_version;
 }
 
+fn confirmInstallPrompt(
+    wanted_version: []const u8,
+    actual_version: []const u8,
+    stdin: *Io.Reader,
+    stdout: *Io.Writer,
+) !bool {
+    if (std.mem.eql(u8, wanted_version, actual_version)) {
+        stdout.print(
+            "Zig version {s} is not installed.\nInstall it? [Y/n] ",
+            .{wanted_version},
+        ) catch {};
+    } else {
+        stdout.print(
+            "Zig version {s} is not installed or available, but version {s} is avaliable online.\nInstall it? [Y/n] ",
+            .{ wanted_version, actual_version },
+        ) catch {};
+    }
+    stdout.flush() catch {};
+
+    const answer = try stdin.takeByte();
+    if (answer != '\n') _ = stdin.discardDelimiterInclusive('\n') catch {};
+    return std.mem.containsAtLeastScalar(u8, "yY\n", answer, 1);
+}
+
 fn spawnZig(
     io: Io,
     versions_dir: Dir,
@@ -340,20 +373,27 @@ pub fn main(init: std.process.Init) void {
     defer client.deinit();
 
     var index: ?[]const u8 = null;
-    // TODO: check env vars to bypass prompts in non-interactive mode
     const zig_version, const installed = ver: {
         var master_ver_buf: [64]u8 = undefined;
-        const v = detectZigVersion(gpa, io, &stdout.interface) orelse {
+        const version = if (detectZigVersion(gpa, io, &stdout.interface)) |v| blk: {
+            defer gpa.free(v);
+            break :blk arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
+        } else blk: {
             index = files.getIndex(arena.allocator(), io, &client, base_dir) catch |err|
                 fatal("Failed to get index: {t}", .{err});
 
-            const ver, const installed = selectVersionMenu(gpa, io, index.?, base_dir, &stdout.interface);
-            defer gpa.free(ver);
-            const version = arena.allocator().dupe(u8, ver) catch fatal("Out of memory", .{});
+            if (!(term.isatty(stdin.file.handle) catch false)) {
+                break :blk EnvVars.getNonEmpty(init.environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
+                    fatal(
+                        "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
+                        .{EnvVars.DEFAULT_ZIG_VERSION},
+                    );
+            }
+            const v, const installed = selectVersionMenu(gpa, io, index.?, base_dir, &stdout.interface);
+            defer gpa.free(v);
+            const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
             break :ver .{ version, installed };
         };
-        defer gpa.free(v);
-        const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
 
         if (files.isZigVersionInstalled(io, versions_dir, version)) break :ver .{ version, true };
         if (files.installedMasterVersion(io, versions_dir, &master_ver_buf)) |mv| blk: {
@@ -368,26 +408,28 @@ pub fn main(init: std.process.Init) void {
             fatal("Failed to get index: {t}", .{err});
         const actual_version = getCompatibleZigVersion(index.?, version) orelse
             fatal("No available Zig version is compatible with {s}", .{version});
-        if (std.mem.eql(u8, version, actual_version)) {
-            stdout.interface.print(
-                "Zig version {s} is not installed.\nInstall it? [Y/n] ",
-                .{version},
-            ) catch {};
-        } else {
-            stdout.interface.print(
-                "Zig version {s} is not installed or available, but version {s} is avaliable online.\nInstall it? [Y/n] ",
-                .{ version, actual_version },
-            ) catch {};
-        }
-        stdout.interface.flush() catch {};
 
-        const answer = stdin.interface.takeByte() catch |err|
-            fatal("Failed to read input: {t}", .{switch (err) {
+        const confirmed = if (term.isatty(stdin.file.handle) catch false)
+            confirmInstallPrompt(
+                version,
+                actual_version,
+                &stdin.interface,
+                &stdout.interface,
+            ) catch |err| fatal("Failed to read input: {t}", .{switch (err) {
                 error.EndOfStream => err,
                 error.ReadFailed => stdin.err.?,
-            }});
-        if (answer != '\n') _ = stdin.interface.discardDelimiterInclusive('\n') catch {};
-        if (!std.mem.containsAtLeastScalar(u8, "yY\n", answer, 1)) {
+            }})
+        else if (EnvVars.getNonEmpty(init.environ_map, EnvVars.ALWAYS_INSTALL) == null)
+            fatal(
+                \\Zig version {s} is not installed.
+                \\Non-interactive mode requires the environment variable {s} to be non-empty to automatically install new versions.
+            ,
+                .{ version, EnvVars.ALWAYS_INSTALL },
+            )
+        else
+            true;
+
+        if (!confirmed) {
             stdout.interface.writeAll("Not installing Zig.\n") catch {};
             stdout.interface.flush() catch {};
             return std.process.cleanExit(io);
