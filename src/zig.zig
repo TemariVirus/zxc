@@ -13,6 +13,11 @@ const files = @import("files.zig");
 const http = @import("http.zig");
 const term = @import("term.zig");
 
+const SAFETY_ON = switch (builtin.optimize) {
+    .debug, .safe => true,
+    .fast, .small => false,
+};
+
 const EnvVars = struct {
     pub const DEFAULT_ZIG_VERSION = "ZXC_DEFAULT_ZIG_VERSION";
     pub const ALWAYS_INSTALL = "ZXC_ALWAYS_INSTALL";
@@ -413,19 +418,34 @@ fn spawnZig(
     // });
 }
 
-pub fn main(init: std.process.Init) void {
-    const gpa = init.gpa;
-    const arena = init.arena;
-    const io = init.io;
+pub fn main(init: std.process.Init.Minimal) void {
+    var safe_gpa = if (SAFETY_ON)
+        std.heap.SafeAllocator.init(std.heap.page_allocator, .{
+            .stack_trace_frames = 7,
+            .check_write_after_free = true,
+        })
+    else {};
+    defer _ = if (SAFETY_ON) safe_gpa.deinit();
+    const gpa = if (SAFETY_ON) safe_gpa.allocator() else std.heap.smp_allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var threaded: Io.Threaded = .init(gpa, .{
+        .stack_size = 512 * 1024,
+        .environ = init.environ,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const environ_map = init.environ.createMap(arena.allocator()) catch |err|
+        fatal("Failed to create env var map: {t}", .{err});
 
     var stdin_buf: [64]u8 = undefined;
     var stdin = Io.File.stdin().readerStreaming(io, &stdin_buf);
     var stdout_buf: [256]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(io, &stdout_buf);
-    const argv: [][]const u8 = @ptrCast(@constCast(init.minimal.args.toSlice(init.arena.allocator()) catch
+    const argv: [][]const u8 = @ptrCast(@constCast(init.args.toSlice(arena.allocator()) catch
         fatal("Out of memory while fetching args", .{})));
 
-    const base_dir = files.openBaseDir(gpa, io, init.environ_map);
+    const base_dir = files.openBaseDir(gpa, io, &environ_map);
     defer base_dir.close(io);
     const versions_dir = base_dir.createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
         fatal("Failed to create versions directory: {t}", .{err});
@@ -450,7 +470,7 @@ pub fn main(init: std.process.Init) void {
             var cleanup_task = if (tmp_dir) |d| io.async(cleanUpTmpDir, .{ io, d }) else null;
             defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
             if (!(term.isatty(stdin.file.handle) catch false)) {
-                break :blk EnvVars.getNonEmpty(init.environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
+                break :blk EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
                     fatal(
                         "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
                         .{EnvVars.DEFAULT_ZIG_VERSION},
@@ -491,7 +511,7 @@ pub fn main(init: std.process.Init) void {
                 error.EndOfStream => err,
                 error.ReadFailed => stdin.err.?,
             }})
-        else if (EnvVars.getNonEmpty(init.environ_map, EnvVars.ALWAYS_INSTALL) == null)
+        else if (EnvVars.getNonEmpty(&environ_map, EnvVars.ALWAYS_INSTALL) == null)
             fatal(
                 \\Zig version {s} is not installed.
                 \\Non-interactive mode requires the environment variable {s} to be non-empty to automatically install new versions.
@@ -514,7 +534,7 @@ pub fn main(init: std.process.Init) void {
             tmp_dir = files.openTmpDir(io, base_dir) catch |err|
                 fatal("Failed to create temporary directory: {t}", .{err});
         }
-        const mirrors = files.getMirrors(arena, &client, base_dir) catch |err| switch (err) {
+        const mirrors = files.getMirrors(&arena, &client, base_dir) catch |err| switch (err) {
             error.NoMirrors => @constCast(&.{}),
             else => fatal("Failed to get mirrors list: {t}", .{err}),
         };
@@ -538,6 +558,6 @@ pub fn main(init: std.process.Init) void {
     // TODO: remove this when replacePath is implemented
     argv[0] = versions_dir.realPathFileAlloc(io, argv[0], arena.allocator()) catch |err| fatal("{t}", .{err});
 
-    spawnZig(io, versions_dir, argv, init.environ_map) catch |err| fatal("Failed to run Zig: {t}", .{err});
+    spawnZig(io, versions_dir, argv, &environ_map) catch |err| fatal("Failed to run Zig: {t}", .{err});
     return std.process.cleanExit(io);
 }
