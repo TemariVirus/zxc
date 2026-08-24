@@ -151,7 +151,7 @@ fn lsAll(
     const index = blk: {
         var client: std.http.Client = .{ .allocator = allocator, .io = io };
         defer client.deinit();
-        break :blk files.getIndex(allocator, io, &client, base_dir) catch |err|
+        break :blk files.getIndex(allocator, &client, base_dir) catch |err|
             fatal("Failed to get index: {t}", .{err});
     };
     defer allocator.free(index);

@@ -17,7 +17,7 @@ pub const FetchResult = struct {
     transfer_buffer: [64]u8 = undefined,
     decompress_buffer: []u8,
     decompress: std.http.Decompress,
-    /// When `error.ReadFailed` is returned, use `getReadErr` to get a more specific error.
+    /// When `error.ReadFailed` is returned, use `getReadErr()` to get a more specific error.
     reader: *std.Io.Reader,
 
     pub fn deinit(self: *FetchResult) void {
@@ -78,6 +78,16 @@ pub fn fetch(client: *Client, uri: std.Uri) !*FetchResult {
     );
 
     return result;
+}
+
+pub fn fetchToFile(client: *Client, uri: std.Uri, writer: *std.Io.File.Writer) !void {
+    const result = try fetch(client, uri);
+    defer result.deinit();
+    _ = result.reader.streamRemaining(&writer.interface) catch |err| switch (err) {
+        error.ReadFailed => return result.getReadErr(),
+        error.WriteFailed => return writer.err.?,
+    };
+    try writer.end();
 }
 
 /// Fetches and returns the signature for the tarball from the given mirror.

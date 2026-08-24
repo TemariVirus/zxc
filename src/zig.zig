@@ -445,7 +445,7 @@ pub fn main(init: std.process.Init) void {
             defer gpa.free(v);
             break :blk arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
         } else blk: {
-            index = files.getIndex(arena.allocator(), io, &client, base_dir) catch |err|
+            index = files.getIndex(arena.allocator(), &client, base_dir) catch |err|
                 fatal("Failed to get index: {t}", .{err});
 
             // Clean up while waiting for user input
@@ -474,7 +474,7 @@ pub fn main(init: std.process.Init) void {
             }
         }
 
-        index = files.getIndex(arena.allocator(), io, &client, base_dir) catch |err|
+        index = files.getIndex(arena.allocator(), &client, base_dir) catch |err|
             fatal("Failed to get index: {t}", .{err});
         const actual_version = getCompatibleZigVersion(index.?, version) orelse
             fatal("No available Zig version is compatible with {s}", .{version});
@@ -516,8 +516,10 @@ pub fn main(init: std.process.Init) void {
             tmp_dir = files.openTmpDir(io, base_dir) catch |err|
                 fatal("Failed to create temporary directory: {t}", .{err});
         }
-        const mirrors = files.getMirrors(arena, io, &client, base_dir) catch |err|
-            fatal("Failed to get mirrors list: {t}", .{err});
+        const mirrors = files.getMirrors(arena, &client, base_dir) catch |err| switch (err) {
+            error.NoMirrors => @constCast(&.{}),
+            else => fatal("Failed to get mirrors list: {t}", .{err}),
+        };
         // If the requested zig version was not installed, we must have searched
         // the index for a version to install, so the index cannot be null.
         installZig(

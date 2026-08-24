@@ -22,7 +22,6 @@ pub const ZIG_NAME = switch (builtin.target.os.tag) {
 /// Thus, any scanners using this stack size will never return an error when
 /// parsing the index.
 pub const INDEX_JSON_STACK_SIZE = 256;
-const MAX_INDEX_AGE: Io.Duration = .fromNanoseconds(1 * std.time.ns_per_day);
 
 pub const ArchiveFormat = enum {
     xz,
@@ -367,24 +366,110 @@ pub fn extractZigTarball(
     try Dir.rename(tmp_dir, dir_name, dst_dir, version_name, io);
 }
 
+fn readAllExact(allocator: Allocator, io: Io, file: Io.File, size: usize) ![]const u8 {
+    var reader: Io.File.Reader = .initSize(file, io, &.{}, size);
+    const content = try allocator.alloc(u8, size);
+    errdefer allocator.free(content);
+    reader.interface.readSliceAll(content) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.EndOfStream => return error.WrongSize,
+    };
+    if (!reader.atEnd()) return error.WrongSize;
+    return content;
+}
+
+const GetPerishableArgs = struct {
+    allocator: Allocator,
+    client: *std.http.Client,
+    base_dir: Dir,
+    base_path: []const u8,
+    /// How long before the file is considered outdated.
+    file_expiry: Io.Duration,
+    /// Where to download the file from.
+    fetch_uri: std.Uri,
+};
+fn getPerishableFile(
+    comptime name: []const u8,
+    comptime Return: type,
+    comptime E: type,
+    comptime getIfValid: fn (Allocator, Io, Io.File, Io.Duration) E!Return,
+    args: GetPerishableArgs,
+) !Return {
+    const io = args.client.io;
+
+    happy: {
+        const file = args.base_dir.openFile(io, args.base_path, .{
+            .allow_directory = false,
+            .mode = .read_only,
+            .lock = .shared,
+            .lock_nonblocking = false,
+        }) catch |err| switch (err) {
+            error.IsDir => {
+                args.base_dir.deleteTree(io, args.base_path) catch {};
+                break :happy;
+            },
+            error.FileNotFound => break :happy,
+            error.NoSpaceLeft,
+            error.PathAlreadyExists,
+            error.WouldBlock,
+            => unreachable,
+            else => |e| return e,
+        };
+        defer file.close(io);
+        if (getIfValid(args.allocator, io, file, args.file_expiry)) |contents| {
+            return contents;
+        } else |_| break :happy;
+    }
+
+    const file = args.base_dir.createFile(io, args.base_path, .{
+        .read = true,
+        .truncate = true,
+        .lock = .exclusive,
+        .lock_nonblocking = false,
+    }) catch |err| switch (err) {
+        error.PathAlreadyExists, error.WouldBlock => unreachable,
+        else => |e| return e,
+    };
+    defer file.close(io);
+    // Did someone else fetch a new file while we were waiting?
+    if (getIfValid(args.allocator, io, file, args.file_expiry)) |contents| {
+        return contents;
+    } else |_| {}
+
+    log.info("Fetching {s}...", .{name});
+    var write_buf: [16 * 1024]u8 = undefined;
+    var file_writer = file.writer(io, &write_buf);
+    if (http.fetchToFile(args.client, args.fetch_uri, &file_writer)) |_| {
+        log.info("Fetched {s}.", .{name});
+    } else |err| {
+        log.warn("Failed to fetch {s}: {t}", .{ name, err });
+    }
+
+    // If the fetch failed, return the old file anyway
+    return getIfValid(args.allocator, io, file, .max);
+}
+
 /// Returns the contents of the index file if it is valid.
-fn getIndexIfValid(allocator: Allocator, io: Io, index_file: Io.File) ![]const u8 {
+fn getIndexIfValid(
+    allocator: Allocator,
+    io: Io,
+    index_file: Io.File,
+    max_age: Io.Duration,
+) ![]const u8 {
     const stat = try index_file.stat(io);
     if (stat.size == 0) {
         return error.NoIndex;
     }
     const age = stat.mtime.untilNow(io, .real);
-    if (age.toNanoseconds() > MAX_INDEX_AGE.toNanoseconds()) {
-        return error.OutdatedIndex;
+    if (age.toNanoseconds() > max_age.toNanoseconds()) {
+        return error.Outdated;
     }
 
-    const content = try allocator.alloc(u8, stat.size);
+    const content = readAllExact(allocator, io, index_file, stat.size) catch |err| switch (err) {
+        error.WrongSize => return error.IndexFileChanged,
+        else => |e| return e,
+    };
     errdefer allocator.free(content);
-    // TODO: use reader interface instead of foring positional reading
-    if (try index_file.readPositionalAll(io, content, 0) != content.len) {
-        return error.IndexFileChanged;
-    }
-
     var stack_buf: [INDEX_JSON_STACK_SIZE]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&stack_buf);
     if (!try std.json.validate(fba.allocator(), content)) {
@@ -393,65 +478,57 @@ fn getIndexIfValid(allocator: Allocator, io: Io, index_file: Io.File) ![]const u
     return content;
 }
 
-// TODO: use old file if unable to fetch
 /// Returns the Zig index, downloading from the internet if necessary.
-pub fn getIndex(
-    allocator: Allocator,
-    io: Io,
-    client: *std.http.Client,
-    base_dir: Dir,
-) ![]const u8 {
+pub fn getIndex(allocator: Allocator, client: *std.http.Client, base_dir: Dir) ![]const u8 {
     const INDEX_URI = comptime std.Uri.parse("https://ziglang.org/download/index.json") catch unreachable;
-    const INDEX_PATH = "index.json";
-
-    const index_file = try base_dir.createFile(io, INDEX_PATH, .{
-        .read = true,
-        .truncate = false,
-    });
-    defer index_file.close(io);
-    if (getIndexIfValid(allocator, io, index_file)) |contents| {
-        return contents;
-    } else |_| {}
-
-    log.info("Fetching index...", .{});
-    var write_buf: [16 * 1024]u8 = undefined;
-    var file_writer = index_file.writer(io, &write_buf);
-    const result = try http.fetch(client, INDEX_URI);
-    defer result.deinit();
-    _ = try result.reader.streamRemaining(&file_writer.interface);
-    try file_writer.end();
-
-    const contents = try getIndexIfValid(allocator, io, index_file);
-    log.info("Fetched index.", .{});
-    return contents;
+    const R = @typeInfo(@TypeOf(getIndexIfValid)).@"fn".return_type.?;
+    return getPerishableFile(
+        "index",
+        []const u8,
+        @typeInfo(R).error_union.error_set,
+        getIndexIfValid,
+        .{
+            .allocator = allocator,
+            .client = client,
+            .base_dir = base_dir,
+            .base_path = "index.json",
+            .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
+            .fetch_uri = INDEX_URI,
+        },
+    );
 }
 
 /// Returns a list of mirrors if the mirrors file is valid.
 /// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
-fn getMirrorsIfValid(allocator: Allocator, io: Io, mirrors_file: Io.File) ![][]const u8 {
+fn getMirrorsIfValid(
+    allocator: Allocator,
+    io: Io,
+    mirrors_file: Io.File,
+    max_age: Io.Duration,
+) ![][]const u8 {
     const stat = try mirrors_file.stat(io);
     if (stat.size == 0) {
         return error.NoMirrors;
     }
     const age = stat.mtime.untilNow(io, .real);
-    if (age.toNanoseconds() > MAX_INDEX_AGE.toNanoseconds()) {
-        return error.OutdatedMirrors;
+    if (age.toNanoseconds() > max_age.toNanoseconds()) {
+        return error.Outdated;
     }
 
-    const buf = try allocator.alloc(u8, stat.size);
-    errdefer allocator.free(buf);
-    if (try mirrors_file.readPositionalAll(io, buf, 0) != buf.len) {
-        return error.MirrorsFileChanged;
-    }
+    const content = readAllExact(allocator, io, mirrors_file, stat.size) catch |err| switch (err) {
+        error.WrongSize => return error.MirrorsFileChanged,
+        else => |e| return e,
+    };
+    errdefer allocator.free(content);
 
-    const line_count = std.mem.countScalar(u8, buf, '\n');
-    if (line_count <= 0) {
+    const line_count = std.mem.countScalar(u8, content, '\n');
+    if (line_count == 0) {
         return error.BadMirrorsFile;
     }
     var mirrors: std.ArrayList([]const u8) = try .initCapacity(allocator, line_count);
     errdefer mirrors.deinit(allocator);
 
-    var lines = std.mem.tokenizeScalar(u8, buf, '\n');
+    var lines = std.mem.tokenizeScalar(u8, content, '\n');
     while (lines.next()) |line| {
         mirrors.appendAssumeCapacity(line);
     }
@@ -461,38 +538,29 @@ fn getMirrorsIfValid(allocator: Allocator, io: Io, mirrors_file: Io.File) ![][]c
     return mirrors.items;
 }
 
-// TODO: use old file if unable to fetch
 /// Returns the list of mirrors, downloading from the internet if necessary.
 /// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
 pub fn getMirrors(
     arena: *std.heap.ArenaAllocator,
-    io: Io,
     client: *std.http.Client,
     base_dir: Dir,
 ) ![][]const u8 {
     const MIRRORS_URI = comptime std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch unreachable;
-    const MIRRORS_PATH = "mirrors.txt";
-
-    const mirrors_file = try base_dir.createFile(io, MIRRORS_PATH, .{
-        .read = true,
-        .truncate = false,
-    });
-    defer mirrors_file.close(io);
-    if (getMirrorsIfValid(arena.allocator(), io, mirrors_file)) |mirrors| {
-        return mirrors;
-    } else |_| {}
-
-    log.info("Fetching mirrors...", .{});
-    var write_buf: [1024]u8 = undefined;
-    var file_writer = mirrors_file.writer(io, &write_buf);
-    const result = try http.fetch(client, MIRRORS_URI);
-    defer result.deinit();
-    _ = try result.reader.streamRemaining(&file_writer.interface);
-    try file_writer.end();
-
-    const mirrors = try getMirrorsIfValid(arena.allocator(), io, mirrors_file);
-    log.info("Fetched mirrors.", .{});
-    return mirrors;
+    const R = @typeInfo(@TypeOf(getMirrorsIfValid)).@"fn".return_type.?;
+    return getPerishableFile(
+        "mirrors",
+        [][]const u8,
+        @typeInfo(R).error_union.error_set,
+        getMirrorsIfValid,
+        .{
+            .allocator = arena.allocator(),
+            .client = client,
+            .base_dir = base_dir,
+            .base_path = "mirrors.txt",
+            .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
+            .fetch_uri = MIRRORS_URI,
+        },
+    );
 }
 
 /// Returns info about the tarball for `zig_version` on `target`, or `null` if it does not exist.
