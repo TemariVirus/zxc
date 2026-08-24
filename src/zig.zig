@@ -272,53 +272,50 @@ fn selectVersionMenu(
 }
 
 /// Tries to detect the required zig version based on the current working directory.
-fn detectZigVersion(allocator: Allocator, io: Io, stdout: *Io.Writer) ?[]const u8 {
+fn detectZigVersion(allocator: Allocator, io: Io) ?[]const u8 {
     const filename = "build.zig.zon";
 
     // This will usually succeed, allowing us to skip a syscall to get the current path
     if (getZigVersionFromBuildZigZon(allocator, io, filename) catch |err| switch (err) {
         error.ParseZon => {
-            stdout.writeAll("Failed to detect Zig version from build.zig.zon.\n") catch {};
-            stdout.flush() catch {};
+            log.warn("Failed to detect Zig version from build.zig.zon.", .{});
             return null;
         },
-        else => fatal("Failed to parse build.zig.zon: {t}", .{err}),
+        else => fatal("Failed to read build.zig.zon: {t}", .{err}),
     }) |ver| return ver;
 
     const path_buf = allocator.alloc(u8, Dir.max_path_bytes + 1 + filename.len) catch fatal("Out of memory", .{});
     defer allocator.free(path_buf);
-    var path = path: {
-        var n = std.process.currentPath(io, path_buf) catch |err| switch (err) {
-            error.NameTooLong => unreachable,
-            else => fatal("Unable to get current working directory: {t}", .{err}),
-        };
-        if (n > Dir.max_path_bytes) fatal("Current working directory name was too long.", .{});
+    const path = path_buf[0 .. std.process.currentPath(io, path_buf) catch |err|
+        fatal("Unable to get current working directory: {t}", .{err})];
+    if (path.len > Dir.max_path_bytes) fatal("Current working directory name was too long.", .{});
 
-        // Append filename to path
-        if (n > 0 and path_buf[n - 1] == Dir.path.sep) n -= 1;
-        path_buf[n] = Dir.path.sep;
-        @memcpy(path_buf[n + 1 ..][0..filename.len], filename);
-        break :path path_buf[0 .. n + 1 + filename.len];
-    };
-
-    while (true) {
-        const cwd = Dir.path.dirname(path) orelse unreachable;
-        const parent = Dir.path.dirname(cwd) orelse {
-            log.info("No build.zig.zon found.", .{});
-            return null;
-        };
-        @memcpy(path[parent.len + 1 ..][0..filename.len], filename);
-        path = path[0 .. parent.len + 1 + filename.len];
-
-        if (getZigVersionFromBuildZigZon(allocator, io, path) catch |err| switch (err) {
+    var iter = Dir.path.componentIterator(path);
+    _ = iter.last() orelse unreachable;
+    while (iter.previous()) |dir| {
+        @memcpy(path_buf[dir.path.len + 1 ..][0..filename.len], filename);
+        const zon_path = path_buf[0 .. dir.path.len + 1 + filename.len];
+        if (getZigVersionFromBuildZigZon(allocator, io, zon_path) catch |err| switch (err) {
             error.ParseZon => {
                 log.warn("Failed to detect Zig version from build.zig.zon.", .{});
                 return null;
             },
-            else => fatal("Failed to parse build.zig.zon: {t}", .{err}),
+            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+        }) |ver| return ver;
+    } else blk: {
+        const dir = iter.root() orelse break :blk;
+        @memcpy(path_buf[dir.len..][0..filename.len], filename);
+        const zon_path = path_buf[0 .. dir.len + filename.len];
+        if (getZigVersionFromBuildZigZon(allocator, io, zon_path) catch |err| switch (err) {
+            error.ParseZon => {
+                log.warn("Failed to detect Zig version from build.zig.zon.", .{});
+                return null;
+            },
+            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
         }) |ver| return ver;
     }
 
+    log.info("No build.zig.zon found.", .{});
     return null;
 }
 
@@ -441,7 +438,7 @@ pub fn main(init: std.process.Init) void {
     defer if (tmp_dir) |d| d.close(io);
     const zig_version, const installed = ver: {
         var master_ver_buf: [64]u8 = undefined;
-        const version = if (detectZigVersion(gpa, io, &stdout.interface)) |v| blk: {
+        const version = if (detectZigVersion(gpa, io)) |v| blk: {
             defer gpa.free(v);
             break :blk arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
         } else blk: {
