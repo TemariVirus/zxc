@@ -248,7 +248,7 @@ fn selectVersionMenu(
         term.previousLine(stdout, menu_height) catch {};
         stdout.flush() catch {};
 
-        const key = kr.read() catch |err| {
+        const key = kr.read(io) catch |err| {
             cleanupVersionMenu(stdout, kr);
             fatal("Unable to read user input: {t}", .{err});
         };
@@ -422,9 +422,9 @@ pub fn main(init: std.process.Init) void {
     const io = init.io;
 
     var stdin_buf: [64]u8 = undefined;
-    var stdin = Io.File.stdin().reader(io, &stdin_buf);
+    var stdin = Io.File.stdin().readerStreaming(io, &stdin_buf);
     var stdout_buf: [256]u8 = undefined;
-    var stdout = Io.File.stdout().writer(io, &stdout_buf);
+    var stdout = Io.File.stdout().writerStreaming(io, &stdout_buf);
     const argv: [][]const u8 = @ptrCast(@constCast(init.minimal.args.toSlice(init.arena.allocator()) catch
         fatal("Out of memory while fetching args", .{})));
 

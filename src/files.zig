@@ -230,7 +230,7 @@ pub fn installedMasterVersion(io: Io, versions_dir: Dir, buffer: []u8) ?[]const 
     }) catch return null;
     defer zig_proc.kill(io);
 
-    var reader = zig_proc.stdout.?.reader(io, buffer);
+    var reader = zig_proc.stdout.?.readerStreaming(io, buffer);
     return reader.interface.takeDelimiter('\n') catch |err| {
         log.warn("Failed to probe installed master verion: {t}", .{switch (err) {
             error.ReadFailed => reader.err.?,
