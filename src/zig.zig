@@ -475,6 +475,7 @@ pub fn main(init: std.process.Init) void {
             fatal("Failed to get index: {t}", .{err});
         const actual_version = getCompatibleZigVersion(index.?, version) orelse
             fatal("No available Zig version is compatible with {s}", .{version});
+        if (files.isZigVersionInstalled(io, versions_dir, actual_version)) break :ver .{ actual_version, true };
 
         // Clean up while waiting for user input
         tmp_dir = files.openTmpDir(io, base_dir) catch null;
