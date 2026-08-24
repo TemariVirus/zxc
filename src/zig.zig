@@ -1,11 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.default;
-const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const Dir = Io.Dir;
+const Io = std.Io;
 const Rng = std.Random.ChaCha;
 const fatal = std.process.fatal;
 
 const KeyReader = @import("KeyReader.zig");
+const LockFile = @import("LockFile.zig");
 const files = @import("files.zig");
 const http = @import("http.zig");
 const term = @import("term.zig");
@@ -20,6 +23,65 @@ const EnvVars = struct {
     }
 };
 
+fn keyFromFilename(name: []const u8) []const u8 {
+    // Lock file
+    if (std.mem.cutSuffix(u8, name, ".lock")) |key| return key;
+    const stem =
+        // Archive file
+        std.mem.cutSuffix(u8, name, ".tar.xz") orelse
+        std.mem.cutSuffix(u8, name, ".zip") orelse
+        // Extracted directory
+        name;
+    const target1 = std.fmt.comptimePrint("zig-{t}-{t}-", .{ builtin.cpu.arch, builtin.os.tag }); // 0.14.1 and above
+    const target2 = std.fmt.comptimePrint("zig-{t}-{t}-", .{ builtin.os.tag, builtin.cpu.arch }); // 0.14.0 and below
+    const version =
+        std.mem.cutPrefix(u8, stem, target1) orelse
+        std.mem.cutPrefix(u8, stem, target2) orelse
+        // Unknown version
+        return "master";
+    // If a custom version doesn't follow semver, returning "master" ensures that
+    // locking still works, at the cost of overzealous locking.
+    const semver = std.SemanticVersion.parse(version) catch return "master";
+    // master should have both `build` and/or `pre` fields set.
+    // Unfortunately this is also the case for Mach's nominated Zig versions,
+    // and we have no way of infering "2026.4.10-mach" from "0.16.0-dev.3142+5ccfeb926"
+    // without scanning through Mach's index.
+    // However that is a bandaid solution that fails if other indexes share those versions.
+    // Thus, we always return "master" to play safe.
+    if (semver.build != null or semver.pre != null) return "master";
+    return version;
+}
+
+/// `tmp_dir` must be opened with `.iterate = true`.
+fn cleanUpTmpDir(io: Io, tmp_dir: Dir) void {
+    var fba_buf: [Dir.max_name_bytes]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&fba_buf);
+    const allocator = fba.allocator();
+
+    var iter = tmp_dir.iterate();
+    while (iter.next(io) catch return) |entry| {
+        switch (entry.kind) {
+            .directory, .file => {},
+            else => continue,
+        }
+
+        const key = keyFromFilename(entry.name);
+        const lock = LockFile.tryLock(allocator, io, tmp_dir, key) catch |err| switch (err) {
+            error.Canceled => return,
+            else => continue,
+        };
+        defer lock.unlock(allocator, io);
+        _ = switch (entry.kind) {
+            .directory => tmp_dir.deleteTree(io, entry.name),
+            .file => tmp_dir.deleteFile(io, entry.name),
+            else => unreachable,
+        } catch |err| switch (err) {
+            error.Canceled => return,
+            else => continue,
+        };
+    }
+}
+
 /// Installs the zig version into `versions_dir`.
 /// The comparessed tarball is temporarily stored in `tmp_dir`.
 fn installZig(
@@ -31,9 +93,17 @@ fn installZig(
     version: []const u8,
     stdout: *Io.Writer,
 ) void {
-    // TODO: race using file locks to ensure only one process tries to install the zig version at a time
     const allocator = client.allocator;
     const io = client.io;
+
+    const lock = LockFile.lock(allocator, io, tmp_dir, version) catch |err|
+        fatal("Failed to create file lock: {t}", .{err});
+    defer lock.unlock(allocator, io);
+    if (files.isNewestVersionInstalled(io, index, versions_dir, version) catch |err| switch (err) {
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+    }) {
+        return;
+    }
 
     log.info("Fetching Zig version {s}...", .{version});
 
@@ -44,9 +114,11 @@ fn installZig(
     };
     rng.random().shuffle([]const u8, mirrors);
 
-    const tarball_info = files.getTarballInfo(index, version, files.SELF_TARGET) catch
-        fatal("Unexpected format for index file. Please update your zxc version.", .{}) orelse
+    const tarball_info = files.getTarballInfo(index, version, files.SELF_TARGET) catch |err| switch (err) {
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+    } orelse {
         fatal("No tarball exists for version {s} on target {s}", .{ version, files.SELF_TARGET });
+    };
     _ = files.ArchiveFormat.fromFileName(tarball_info.name) orelse
         fatal("Unsupported archive format: {s}", .{Dir.path.extension(tarball_info.name)});
     // Prevent path traversal
@@ -54,16 +126,9 @@ fn installZig(
         if (Dir.path.isSep(c)) fatal("Invalid tarball name: {s}\n", .{tarball_info.name});
     }
 
-    // TODO: respect per-version file lock
-    // base_dir.deleteTree(io, TMP_DIR_SUBPATH) catch {}; // Try to clean up stuff from previous crashes
-
     const archive_file = tmp_dir.createFile(io, tarball_info.name, .{ .read = true }) catch |err|
         fatal("Failed to create tarball file: {t}", .{err});
-    defer {
-        archive_file.close(io);
-        log.info("Cleaning up extracted tarball...", .{});
-        tmp_dir.deleteFile(io, tarball_info.name) catch {};
-    }
+    defer archive_file.close(io);
     archive_file.setLength(io, tarball_info.size) catch {};
 
     for (mirrors) |mirror| {
@@ -76,22 +141,21 @@ fn installZig(
             fatal("Exhausted all sources. Exiting.", .{});
     }
 
-    {
-        const archive_buf = allocator.alloc(u8, 64 * 1024) catch fatal("Out of memory", .{});
-        defer allocator.free(archive_buf);
-        log.info("Extracting tarball...", .{});
-        var reader = archive_file.reader(io, archive_buf);
-        files.extractZigTarball(allocator, io, versions_dir, tmp_dir, &reader, tarball_info.name, version) catch |err|
-            fatal("Failed to extract tarball: {t}", .{err});
-    }
+    log.info("Extracting tarball...", .{});
+    files.extractZigTarball(allocator, io, versions_dir, tmp_dir, archive_file, tarball_info.name, version) catch |err|
+        fatal("Failed to extract tarball: {t}", .{err});
 
     log.info("Successfully installed zig {s}!", .{version});
+
+    log.info("Cleaning up extracted tarball...", .{});
+    tmp_dir.deleteFile(io, tarball_info.name) catch {};
+    cleanUpTmpDir(io, tmp_dir);
 }
 
 /// Returns the zig version from `zon_path`, or null if the path does not exist.
 /// If the file at `zon_path` does not store the zig version, `error.ParseZon` is returned.
 fn getZigVersionFromBuildZigZon(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     io: Io,
     zon_path: []const u8,
 ) !?[]const u8 {
@@ -130,7 +194,7 @@ fn cleanupVersionMenu(stdout: *Io.Writer, kr: KeyReader) void {
 }
 
 fn selectVersionMenu(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     io: Io,
     index: []const u8,
     base_dir: Dir,
@@ -208,7 +272,7 @@ fn selectVersionMenu(
 }
 
 /// Tries to detect the required zig version based on the current working directory.
-fn detectZigVersion(allocator: std.mem.Allocator, io: Io, stdout: *Io.Writer) ?[]const u8 {
+fn detectZigVersion(allocator: Allocator, io: Io, stdout: *Io.Writer) ?[]const u8 {
     const filename = "build.zig.zon";
 
     // This will usually succeed, allowing us to skip a syscall to get the current path
@@ -373,6 +437,8 @@ pub fn main(init: std.process.Init) void {
     defer client.deinit();
 
     var index: ?[]const u8 = null;
+    var tmp_dir: ?Dir = null;
+    defer if (tmp_dir) |d| d.close(io);
     const zig_version, const installed = ver: {
         var master_ver_buf: [64]u8 = undefined;
         const version = if (detectZigVersion(gpa, io, &stdout.interface)) |v| blk: {
@@ -382,6 +448,10 @@ pub fn main(init: std.process.Init) void {
             index = files.getIndex(arena.allocator(), io, &client, base_dir) catch |err|
                 fatal("Failed to get index: {t}", .{err});
 
+            // Clean up while waiting for user input
+            tmp_dir = files.openTmpDir(io, base_dir) catch null;
+            var cleanup_task = if (tmp_dir) |d| io.async(cleanUpTmpDir, .{ io, d }) else null;
+            defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
             if (!(term.isatty(stdin.file.handle) catch false)) {
                 break :blk EnvVars.getNonEmpty(init.environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
                     fatal(
@@ -409,6 +479,10 @@ pub fn main(init: std.process.Init) void {
         const actual_version = getCompatibleZigVersion(index.?, version) orelse
             fatal("No available Zig version is compatible with {s}", .{version});
 
+        // Clean up while waiting for user input
+        tmp_dir = files.openTmpDir(io, base_dir) catch null;
+        var cleanup_task = if (tmp_dir) |d| io.async(cleanUpTmpDir, .{ io, d }) else null;
+        defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
         const confirmed = if (term.isatty(stdin.file.handle) catch false)
             confirmInstallPrompt(
                 version,
@@ -438,16 +512,17 @@ pub fn main(init: std.process.Init) void {
         break :ver .{ actual_version, false };
     };
     if (!installed) {
-        const tmp_dir = base_dir.createDirPathOpen(io, "tmp", .{}) catch |err|
-            fatal("Failed to create temporary directory: {t}", .{err});
-        defer tmp_dir.close(io);
+        if (tmp_dir == null) {
+            tmp_dir = files.openTmpDir(io, base_dir) catch |err|
+                fatal("Failed to create temporary directory: {t}", .{err});
+        }
         const mirrors = files.getMirrors(arena, io, &client, base_dir) catch |err|
             fatal("Failed to get mirrors list: {t}", .{err});
         // If the requested zig version was not installed, we must have searched
         // the index for a version to install, so the index cannot be null.
         installZig(
             &client,
-            tmp_dir,
+            tmp_dir.?,
             versions_dir,
             mirrors,
             index.?,

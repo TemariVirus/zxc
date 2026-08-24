@@ -186,6 +186,31 @@ pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) boo
     return true;
 }
 
+/// Similar to `isZigVersionInstalled`, but checks if installed master version
+/// is the latest when `version` is "master".
+/// Assumes `index` contains the latest master version.
+pub fn isNewestVersionInstalled(
+    io: Io,
+    index: []const u8,
+    versions_dir: Dir,
+    version: []const u8,
+) !bool {
+    if (!std.mem.eql(u8, version, "master")) {
+        return isZigVersionInstalled(io, versions_dir, version);
+    }
+
+    var buf: [64]u8 = undefined;
+    const installed_version = installedMasterVersion(io, versions_dir, &buf) orelse return false;
+    var iter: IndexIterator = undefined;
+    try iter.init(index);
+    while (try iter.next()) |zig| {
+        if (!std.mem.eql(u8, zig.name, "master")) continue;
+        if (zig.version == null) return false;
+        return std.mem.eql(u8, zig.version.?, installed_version);
+    }
+    return false;
+}
+
 /// Returns the actual version of "master" if it is installed, or `null` otherwise.
 /// `buffer` is used to store the result.
 pub fn installedMasterVersion(io: Io, versions_dir: Dir, buffer: []u8) ?[]const u8 {
@@ -304,6 +329,11 @@ pub fn openBaseDir(allocator: Allocator, io: Io, environ: *const Environ.Map) Di
     };
 }
 
+/// Opens and returns zxc's tmp directory with `.iterate = true`.
+pub fn openTmpDir(io: Io, base_dir: Dir) !Dir {
+    return try base_dir.createDirPathOpen(io, "tmp", .{ .open_options = .{ .iterate = true } });
+}
+
 /// Extracts `tarball` into `dst_dir` as a directory named `version_name`.
 /// The tarball is first extracted into `tmp_dir` before being renamed to (try to) make the operation atomic.
 pub fn extractZigTarball(
@@ -311,10 +341,14 @@ pub fn extractZigTarball(
     io: Io,
     dst_dir: Dir,
     tmp_dir: Dir,
-    tarball: *Io.File.Reader,
+    tarball: Io.File,
     tarball_name: []const u8,
     version_name: []const u8,
 ) !void {
+    const buf = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(buf);
+    var reader = tarball.reader(io, buf);
+
     const tarball_format = ArchiveFormat.fromFileName(tarball_name) orelse unreachable;
     const dir_name = switch (tarball_format) {
         .xz => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
@@ -323,11 +357,11 @@ pub fn extractZigTarball(
     try tmp_dir.deleteTree(io, dir_name);
     switch (tarball_format) {
         .xz => {
-            var d: std.compress.xz.Decompress = try .init(&tarball.interface, allocator, &.{});
+            var d: std.compress.xz.Decompress = try .init(&reader.interface, allocator, &.{});
             defer d.deinit();
             try std.tar.extract(io, tmp_dir, &d.reader, .{});
         },
-        .zip => try std.zip.extract(tmp_dir, tarball, .{}),
+        .zip => try std.zip.extract(tmp_dir, &reader, .{}),
     }
     try dst_dir.deleteTree(io, version_name);
     try Dir.rename(tmp_dir, dir_name, dst_dir, version_name, io);
@@ -346,6 +380,7 @@ fn getIndexIfValid(allocator: Allocator, io: Io, index_file: Io.File) ![]const u
 
     const content = try allocator.alloc(u8, stat.size);
     errdefer allocator.free(content);
+    // TODO: use reader interface instead of foring positional reading
     if (try index_file.readPositionalAll(io, content, 0) != content.len) {
         return error.IndexFileChanged;
     }
@@ -358,6 +393,7 @@ fn getIndexIfValid(allocator: Allocator, io: Io, index_file: Io.File) ![]const u
     return content;
 }
 
+// TODO: use old file if unable to fetch
 /// Returns the Zig index, downloading from the internet if necessary.
 pub fn getIndex(
     allocator: Allocator,
@@ -425,6 +461,7 @@ fn getMirrorsIfValid(allocator: Allocator, io: Io, mirrors_file: Io.File) ![][]c
     return mirrors.items;
 }
 
+// TODO: use old file if unable to fetch
 /// Returns the list of mirrors, downloading from the internet if necessary.
 /// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
 pub fn getMirrors(
