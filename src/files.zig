@@ -267,15 +267,24 @@ pub fn getAllVersions(
     base_dir: Dir,
     index: []const u8,
 ) ![]ZigVersion {
-    const versions_dir = try base_dir.openDir(io, VERSIONS_DIR, .{ .iterate = true });
-    defer versions_dir.close(io);
+    const versions_dir = base_dir.openDir(
+        io,
+        VERSIONS_DIR,
+        .{ .iterate = true },
+    ) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => null,
+        else => |e| return e,
+    };
+    defer if (versions_dir) |vd| vd.close(io);
 
     var installed: std.StringHashMap(void) = .init(allocator);
-    try InstalledZigIterator.collectSet(io, versions_dir, &installed);
+    if (versions_dir) |vd| {
+        try InstalledZigIterator.collectSet(io, vd, &installed);
+    }
 
     const master_ver_buf = try allocator.alloc(u8, 64);
-    const master_ver = if (installed.contains("master"))
-        installedMasterVersion(io, versions_dir, master_ver_buf)
+    const master_ver = if (installed.contains("master") and versions_dir != null)
+        installedMasterVersion(io, versions_dir.?, master_ver_buf)
     else
         null;
 
