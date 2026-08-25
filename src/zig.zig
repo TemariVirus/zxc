@@ -445,7 +445,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     const argv: [][]const u8 = @ptrCast(@constCast(init.args.toSlice(arena.allocator()) catch
         fatal("Out of memory while fetching args", .{})));
 
-    const base_dir = files.openBaseDir(gpa, io, &environ_map);
+    const base_dir = files.openBaseDir(io, &environ_map);
     defer base_dir.close(io);
     const versions_dir = base_dir.createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
         fatal("Failed to create versions directory: {t}", .{err});

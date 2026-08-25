@@ -176,6 +176,26 @@ pub const InstalledZigIterator = struct {
     }
 };
 
+/// Joins the paths in `paths` with the existing path `buf[0..base_len]`.
+/// Returns a slice into `buf`.
+pub fn joinPathsInPlace(buf: []u8, base_len: usize, paths: []const []const u8) error{OutOfMemory}![]const u8 {
+    const isSep = Dir.path.isSep;
+    const first_path = for (paths) |p| {
+        if (p.len > 0) break p;
+    } else return buf[0..base_len];
+    const start = if (base_len == 0)
+        0
+    else
+        base_len + 1 - @intFromBool(isSep(buf[base_len - 1])) - @intFromBool(isSep(first_path[0]));
+
+    if (!isSep(buf[base_len - 1]) and !isSep(first_path[0])) {
+        buf[start - 1] = Dir.path.sep;
+    }
+    var fba: std.heap.FixedBufferAllocator = .init(buf[start..]);
+    const n = (try Dir.path.join(fba.allocator(), paths)).len;
+    return buf[0 .. start + n];
+}
+
 /// Returns whether the given Zig version is installed in `versions_dir`.
 pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) bool {
     var path_buf: [Dir.max_name_bytes + 1 + ZIG_NAME.len]u8 = undefined;
@@ -306,26 +326,21 @@ pub fn getAllVersionsInner(
 }
 
 /// Opens and returns zxc's base directory.
-pub fn openBaseDir(allocator: Allocator, io: Io, environ: *const Environ.Map) Dir {
-    const FALLBACK_BASE_PATH = comptime std.fmt.comptimePrint("{f}", .{Dir.path.fmtJoin(
-        &.{ "~", "." ++ BASE_DIR },
-    )});
-    blk: {
-        if (known_folders.getPath(
-            io,
-            allocator,
-            environ,
-            .cache,
-        ) catch break :blk) |cache_path| {
-            defer allocator.free(cache_path);
-            const path = Dir.path.join(allocator, &.{ cache_path, BASE_DIR }) catch break :blk;
-            defer allocator.free(path);
-            return Dir.cwd().createDirPathOpen(io, path, .{}) catch break :blk;
-        }
-    }
-    return Dir.cwd().createDirPathOpen(io, FALLBACK_BASE_PATH, .{}) catch |err| {
-        fatal("Failed to open base dir '{s}': {t}", .{ FALLBACK_BASE_PATH, err });
-    };
+pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    const cache_path = known_folders.getPath(
+        io,
+        fba.allocator(),
+        environ,
+        .cache,
+    ) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err}) orelse
+        fatal("Failed to locate base dir.", .{});
+    const path = joinPathsInPlace(&buf, cache_path.len, &.{BASE_DIR}) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err});
+    return Dir.cwd().createDirPathOpen(io, path, .{}) catch |err|
+        fatal("Failed to open base dir '{s}': {t}", .{ path, err });
 }
 
 /// Opens and returns zxc's tmp directory with `.iterate = true`.

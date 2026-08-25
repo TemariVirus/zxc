@@ -261,12 +261,12 @@ pub fn main(init: std.process.Init) void {
     switch (args) {
         .help => stdout.interface.writeAll(Args.help_text) catch {},
         .ls => |opts| {
-            const base_dir = files.openBaseDir(gpa, io, init.environ_map);
+            const base_dir = files.openBaseDir(io, init.environ_map);
             defer base_dir.close(io);
             lsCmd(gpa, io, base_dir, opts);
         },
         .rm => |opts| {
-            const base_dir = files.openBaseDir(gpa, io, init.environ_map);
+            const base_dir = files.openBaseDir(io, init.environ_map);
             defer base_dir.close(io);
             rmCmd(io, base_dir, opts);
         },
