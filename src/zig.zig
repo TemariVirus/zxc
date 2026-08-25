@@ -87,12 +87,12 @@ fn cleanUpTmpDir(io: Io, tmp_dir: Dir) void {
     }
 }
 
-/// Installs the zig version into `versions_dir`.
+/// Installs the zig version into a subfolder in `versions_path`.
 /// The comparessed tarball is temporarily stored in `tmp_dir`.
 fn installZig(
     client: *std.http.Client,
     tmp_dir: Dir,
-    versions_dir: Dir,
+    versions_path: []const u8,
     mirrors: [][]const u8,
     index: []const u8,
     version: []const u8,
@@ -104,13 +104,17 @@ fn installZig(
     const lock = LockFile.lock(allocator, io, tmp_dir, version) catch |err|
         fatal("Failed to create file lock: {t}", .{err});
     defer lock.unlock(allocator, io);
-    if (files.isNewestVersionInstalled(io, index, versions_dir, version) catch |err| switch (err) {
+    if (files.isNewestVersionInstalled(io, index, versions_path, version) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
     }) {
         return;
     }
 
     log.info("Fetching Zig version {s}...", .{version});
+
+    const versions_dir = Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
+        fatal("Failed to create versions directory: {t}", .{err});
+    defer versions_dir.close(io);
 
     var rng: Rng = rng: {
         var seed: [Rng.secret_seed_length]u8 = undefined;
@@ -202,14 +206,14 @@ fn selectVersionMenu(
     allocator: Allocator,
     io: Io,
     index: []const u8,
-    base_dir: Dir,
+    versions_path: []const u8,
     stdout: *Io.Writer,
 ) struct { []const u8, bool } {
     const MAX_MENU_HEIGHT = 10;
 
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    const versions = files.getAllVersions(arena.allocator(), io, base_dir, index) catch |err| switch (err) {
+    const versions = files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
         error.OutOfMemory => fatal("Out of memory", .{}),
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
         else => fatal("Unable to open versions folder: {t}", .{err}),
@@ -289,11 +293,10 @@ fn detectZigVersion(allocator: Allocator, io: Io) ?[]const u8 {
         else => fatal("Failed to read build.zig.zon: {t}", .{err}),
     }) |ver| return ver;
 
-    const path_buf = allocator.alloc(u8, Dir.max_path_bytes + 1 + filename.len) catch fatal("Out of memory", .{});
-    defer allocator.free(path_buf);
-    const path = path_buf[0 .. std.process.currentPath(io, path_buf) catch |err|
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0 .. std.process.currentPath(io, &path_buf) catch |err|
         fatal("Unable to get current working directory: {t}", .{err})];
-    if (path.len > Dir.max_path_bytes) fatal("Current working directory name was too long.", .{});
+    if (path.len + 1 + filename.len > path_buf.len) fatal("Current working directory name was too long.", .{});
 
     var iter = Dir.path.componentIterator(path);
     _ = iter.last() orelse unreachable;
@@ -380,42 +383,43 @@ fn confirmInstallPrompt(
 
 fn spawnZig(
     io: Io,
-    versions_dir: Dir,
     argv: []const []const u8,
     environ_map: *const std.process.Environ.Map,
 ) !void {
-    _ = versions_dir; // autofix
-    var child = std.process.spawn(io, .{
+    if (SAFETY_ON) {
+        // Spawn a new process instead of replacing, so that we can exit normally and collect errors
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .expand_arg0 = .no_expand,
+            .environ_map = environ_map,
+        }) catch |err| switch (err) {
+            error.PermissionDenied => blk: {
+                try Dir.setFilePermissions(.cwd(), io, argv[0], .executable_file, .{});
+                break :blk try std.process.spawn(io, .{
+                    .argv = argv,
+                    .expand_arg0 = .no_expand,
+                    .environ_map = environ_map,
+                });
+            },
+            else => |e| return e,
+        };
+        _ = child.wait(io) catch {};
+        return;
+    }
+
+    switch (std.process.replace(io, .{
         .argv = argv,
         .expand_arg0 = .no_expand,
         .environ_map = environ_map,
-    }) catch |err| switch (err) {
-        error.PermissionDenied => blk: {
-            try Dir.setFilePermissions(.cwd(), io, argv[0], .executable_file, .{});
-            break :blk try std.process.spawn(io, .{
-                .argv = argv,
-                .expand_arg0 = .no_expand,
-                .environ_map = environ_map,
-            });
-        },
-        else => |e| return e,
-    };
-    _ = child.wait(io) catch {};
-
-    // TODO: use this instead when std.Io implements it
-    // switch (std.process.replacePath(io, versions_dir, .{
-    //     .argv = argv,
-    //     .expand_arg0 = .no_expand,
-    //     .environ_map = environ_map,
-    // })) {
-    //     error.PermissionDenied => try Dir.setFilePermissions(versions_dir, io, argv[0], .executable_file, .{}),
-    //     else => |err| return err,
-    // }
-    // return std.process.replacePath(io, versions_dir, .{
-    //     .argv = argv,
-    //     .expand_arg0 = .no_expand,
-    //     .environ_map = environ_map,
-    // });
+    })) {
+        error.PermissionDenied => try Dir.cwd().setFilePermissions(io, argv[0], .executable_file, .{}),
+        else => |err| return err,
+    }
+    return std.process.replace(io, .{
+        .argv = argv,
+        .expand_arg0 = .no_expand,
+        .environ_map = environ_map,
+    });
 }
 
 pub fn main(init: std.process.Init.Minimal) void {
@@ -445,11 +449,14 @@ pub fn main(init: std.process.Init.Minimal) void {
     const argv: [][]const u8 = @ptrCast(@constCast(init.args.toSlice(arena.allocator()) catch
         fatal("Out of memory while fetching args", .{})));
 
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const base_path = files.getBasePath(io, &environ_map, &path_buf) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err});
+    const versions_path = files.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+        fatal("Out of memory", .{});
+
     const base_dir = files.openBaseDir(io, &environ_map);
     defer base_dir.close(io);
-    const versions_dir = base_dir.createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
-        fatal("Failed to create versions directory: {t}", .{err});
-    defer versions_dir.close(io);
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
 
@@ -476,14 +483,14 @@ pub fn main(init: std.process.Init.Minimal) void {
                         .{EnvVars.DEFAULT_ZIG_VERSION},
                     );
             }
-            const v, const installed = selectVersionMenu(gpa, io, index.?, base_dir, &stdout.interface);
+            const v, const installed = selectVersionMenu(gpa, io, index.?, versions_path, &stdout.interface);
             defer gpa.free(v);
             const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
             break :ver .{ version, installed };
         };
 
-        if (files.isZigVersionInstalled(io, versions_dir, version)) break :ver .{ version, true };
-        if (files.installedMasterVersion(io, versions_dir, &master_ver_buf)) |mv| blk: {
+        if (files.isZigVersionInstalled(io, versions_path, version)) break :ver .{ version, true };
+        if (files.installedMasterVersion(io, versions_path, &master_ver_buf)) |mv| blk: {
             const wanted = std.SemanticVersion.parse(version) catch break :blk;
             const master = std.SemanticVersion.parse(mv) catch break :blk;
             if (wanted.major == master.major and wanted.minor == master.minor) {
@@ -495,7 +502,7 @@ pub fn main(init: std.process.Init.Minimal) void {
             fatal("Failed to get index: {t}", .{err});
         const actual_version = getCompatibleZigVersion(index.?, version) orelse
             fatal("No available Zig version is compatible with {s}", .{version});
-        if (files.isZigVersionInstalled(io, versions_dir, actual_version)) break :ver .{ actual_version, true };
+        if (files.isZigVersionInstalled(io, versions_path, actual_version)) break :ver .{ actual_version, true };
 
         // Clean up while waiting for user input
         tmp_dir = files.openTmpDir(io, base_dir) catch null;
@@ -543,7 +550,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         installZig(
             &client,
             tmp_dir.?,
-            versions_dir,
+            versions_path,
             mirrors,
             index.?,
             zig_version,
@@ -551,13 +558,12 @@ pub fn main(init: std.process.Init.Minimal) void {
         );
     }
 
-    var zig_path_buf: [Dir.max_name_bytes + 1 + files.ZIG_NAME.len]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&zig_path_buf);
-    argv[0] = Dir.path.join(fba.allocator(), &.{ zig_version, files.ZIG_NAME }) catch |err|
+    argv[0] = files.joinPathsInPlace(
+        &path_buf,
+        versions_path.len,
+        &.{ zig_version, files.ZIG_NAME },
+    ) catch |err|
         fatal("Failed to make path to Zig executable: {t}", .{err});
-    // TODO: remove this when replacePath is implemented
-    argv[0] = versions_dir.realPathFileAlloc(io, argv[0], arena.allocator()) catch |err| fatal("{t}", .{err});
-
-    spawnZig(io, versions_dir, argv, &environ_map) catch |err| fatal("Failed to run Zig: {t}", .{err});
+    spawnZig(io, argv, &environ_map) catch |err| fatal("Failed to run Zig: {t}", .{err});
     return std.process.cleanExit(io);
 }

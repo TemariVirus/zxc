@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Dir = Io.Dir;
 const Environ = std.process.Environ;
+const assert = std.debug.assert;
 const fatal = std.process.fatal;
 
 const builtin = @import("builtin");
@@ -156,7 +157,7 @@ pub const InstalledZigIterator = struct {
     pub fn next(self: *InstalledZigIterator, io: Io) ?[]const u8 {
         while (self.dir_iter.next(io) catch |err| fatal("Failed to iterate versions folder: {t}", .{err})) |entry| {
             if (entry.kind == .directory and
-                isZigVersionInstalled(io, self.versionsDir(), entry.name))
+                isZigVersionInstalledDir(io, self.versionsDir(), entry.name))
             {
                 return entry.name;
             }
@@ -178,7 +179,7 @@ pub const InstalledZigIterator = struct {
 
 /// Joins the paths in `paths` with the existing path `buf[0..base_len]`.
 /// Returns a slice into `buf`.
-pub fn joinPathsInPlace(buf: []u8, base_len: usize, paths: []const []const u8) error{OutOfMemory}![]const u8 {
+pub fn joinPathsInPlace(buf: []u8, base_len: usize, paths: []const []const u8) error{OutOfMemory}![]u8 {
     const isSep = Dir.path.isSep;
     const first_path = for (paths) |p| {
         if (p.len > 0) break p;
@@ -196,8 +197,20 @@ pub fn joinPathsInPlace(buf: []u8, base_len: usize, paths: []const []const u8) e
     return buf[0 .. start + n];
 }
 
-/// Returns whether the given Zig version is installed in `versions_dir`.
-pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) bool {
+/// Returns whether the given Zig version is installed.
+pub fn isZigVersionInstalled(io: Io, versions_path: []const u8, version: []const u8) bool {
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
+    const path = Dir.path.join(
+        fba.allocator(),
+        &.{ versions_path, version, ZIG_NAME },
+    ) catch return false;
+    Dir.accessAbsolute(io, path, .{ .execute = true }) catch return false;
+    return true;
+}
+
+/// Similar to `isZigVersionInstalled`, but takes an open file handle to the versions directory.
+pub fn isZigVersionInstalledDir(io: Io, versions_dir: Dir, version: []const u8) bool {
     var path_buf: [Dir.max_name_bytes + 1 + ZIG_NAME.len]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
     const path = Dir.path.join(fba.allocator(), &.{ version, ZIG_NAME }) catch return false;
@@ -211,15 +224,15 @@ pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) boo
 pub fn isNewestVersionInstalled(
     io: Io,
     index: []const u8,
-    versions_dir: Dir,
+    versions_path: []const u8,
     version: []const u8,
 ) !bool {
     if (!std.mem.eql(u8, version, "master")) {
-        return isZigVersionInstalled(io, versions_dir, version);
+        return isZigVersionInstalled(io, versions_path, version);
     }
 
     var buf: [64]u8 = undefined;
-    const installed_version = installedMasterVersion(io, versions_dir, &buf) orelse return false;
+    const installed_version = installedMasterVersion(io, versions_path, &buf) orelse return false;
     var iter: IndexIterator = undefined;
     try iter.init(index);
     while (try iter.next()) |zig| {
@@ -232,14 +245,14 @@ pub fn isNewestVersionInstalled(
 
 /// Returns the actual version of "master" if it is installed, or `null` otherwise.
 /// `buffer` is used to store the result.
-pub fn installedMasterVersion(io: Io, versions_dir: Dir, buffer: []u8) ?[]const u8 {
-    // TODO: replace when spawnPath is implemented
+pub fn installedMasterVersion(io: Io, versions_path: []const u8, buffer: []u8) ?[]const u8 {
+    assert(Dir.path.isAbsolute(versions_path));
+
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
-    const path = versions_dir.realPathFileAlloc(
-        io,
-        "master" ++ Dir.path.sep_str ++ ZIG_NAME,
+    const path = Dir.path.join(
         fba.allocator(),
+        &.{ versions_path, "master", ZIG_NAME },
     ) catch return null;
     var zig_proc = std.process.spawn(io, .{
         .argv = &.{ path, "version" },
@@ -264,12 +277,12 @@ pub fn installedMasterVersion(io: Io, versions_dir: Dir, buffer: []u8) ?[]const 
 pub fn getAllVersions(
     allocator: Allocator,
     io: Io,
-    base_dir: Dir,
+    versions_path: []const u8,
     index: []const u8,
 ) ![]ZigVersion {
-    const versions_dir = base_dir.openDir(
+    const versions_dir = Dir.openDirAbsolute(
         io,
-        VERSIONS_DIR,
+        versions_path,
         .{ .iterate = true },
     ) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => null,
@@ -283,8 +296,8 @@ pub fn getAllVersions(
     }
 
     const master_ver_buf = try allocator.alloc(u8, 64);
-    const master_ver = if (installed.contains("master") and versions_dir != null)
-        installedMasterVersion(io, versions_dir.?, master_ver_buf)
+    const master_ver = if (installed.contains("master"))
+        installedMasterVersion(io, versions_path, master_ver_buf)
     else
         null;
 
@@ -334,19 +347,22 @@ pub fn getAllVersionsInner(
     return versions.toOwnedSlice(allocator);
 }
 
-/// Opens and returns zxc's base directory.
-pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
-    var buf: [Dir.max_path_bytes]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&buf);
-    const cache_path = known_folders.getPath(
+pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
+    var fba: std.heap.FixedBufferAllocator = .init(buf);
+    const cache_path = try known_folders.getPath(
         io,
         fba.allocator(),
         environ,
         .cache,
-    ) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err}) orelse
-        fatal("Failed to locate base dir.", .{});
-    const path = joinPathsInPlace(&buf, cache_path.len, &.{BASE_DIR}) catch |err|
+    ) orelse return error.CacheDirNotFound;
+    if (!Dir.path.isAbsolute(cache_path)) return error.CacheDirNotFound;
+    return try joinPathsInPlace(buf, cache_path.len, &.{BASE_DIR});
+}
+
+/// Opens and returns zxc's base directory.
+pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    const path = getBasePath(io, environ, &buf) catch |err|
         fatal("Failed to locate base dir: {t}", .{err});
     return Dir.cwd().createDirPathOpen(io, path, .{}) catch |err|
         fatal("Failed to open base dir '{s}': {t}", .{ path, err });

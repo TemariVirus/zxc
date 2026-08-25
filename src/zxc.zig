@@ -146,6 +146,7 @@ fn lsAll(
     allocator: std.mem.Allocator,
     io: Io,
     base_dir: Io.Dir,
+    versions_path: []const u8,
     stdout: *Io.Writer,
 ) void {
     const index = blk: {
@@ -158,7 +159,7 @@ fn lsAll(
 
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    const versions = files.getAllVersions(arena.allocator(), io, base_dir, index) catch |err| switch (err) {
+    const versions = files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
         error.OutOfMemory => fatal("Out of memory", .{}),
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
         else => fatal("Unable to open versions folder: {t}", .{err}),
@@ -173,24 +174,33 @@ fn lsAll(
 fn lsCmd(
     allocator: std.mem.Allocator,
     io: Io,
-    base_dir: Io.Dir,
+    env_map: *const std.process.Environ.Map,
     opts: LsArgs,
 ) void {
     var stdout_buf: [64]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &stdout_buf);
-
     if (opts.help) {
         stdout.interface.writeAll(LsArgs.help_text) catch {};
         return stdout.flush() catch {};
     }
+
+    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err});
+    const versions_path = files.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+        fatal("Out of memory", .{});
+
     if (opts.all) {
-        return lsAll(allocator, io, base_dir, &stdout.interface);
+        const base_dir = Io.Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
+            fatal("Failed to open base dir '{s}': {t}", .{ base_path, err });
+        defer base_dir.close(io);
+        return lsAll(allocator, io, base_dir, versions_path, &stdout.interface);
     }
 
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     // Pass empty index to only get installed versions
-    const versions = files.getAllVersions(arena.allocator(), io, base_dir, "{}") catch |err| switch (err) {
+    const versions = files.getAllVersions(arena.allocator(), io, versions_path, "{}") catch |err| switch (err) {
         error.OutOfMemory => fatal("Out of memory", .{}),
         error.UnexpectedFormat => unreachable,
         else => fatal("Unable to open versions folder: {t}", .{err}),
@@ -209,16 +219,21 @@ fn lsCmd(
     stdout.flush() catch {};
 }
 
-fn rmCmd(io: Io, base_dir: Io.Dir, opts: RmArgs) void {
+fn rmCmd(io: Io, env_map: *const std.process.Environ.Map, opts: RmArgs) void {
     var stdout_buf: [64]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &stdout_buf);
-
     if (opts.help) {
         stdout.interface.writeAll(RmArgs.help_text) catch {};
         return stdout.flush() catch {};
     }
 
-    const versions_dir = base_dir.createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
+    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err});
+    const versions_path = files.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+        fatal("Out of memory", .{});
+
+    const versions_dir = Io.Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
         fatal("Unable to open versions folder: {t}", .{err});
     defer versions_dir.close(io);
     version_loop: while (opts.nextVersion()) |version| {
@@ -260,16 +275,8 @@ pub fn main(init: std.process.Init) void {
     };
     switch (args) {
         .help => stdout.interface.writeAll(Args.help_text) catch {},
-        .ls => |opts| {
-            const base_dir = files.openBaseDir(io, init.environ_map);
-            defer base_dir.close(io);
-            lsCmd(gpa, io, base_dir, opts);
-        },
-        .rm => |opts| {
-            const base_dir = files.openBaseDir(io, init.environ_map);
-            defer base_dir.close(io);
-            rmCmd(io, base_dir, opts);
-        },
+        .ls => |opts| lsCmd(gpa, io, init.environ_map, opts),
+        .rm => |opts| rmCmd(io, init.environ_map, opts),
         .version => stdout.interface.writeAll(options.version ++ "\n") catch {},
     }
     stdout.flush() catch {};
