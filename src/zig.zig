@@ -28,65 +28,6 @@ const EnvVars = struct {
     }
 };
 
-fn keyFromFilename(name: []const u8) []const u8 {
-    // Lock file
-    if (std.mem.cutSuffix(u8, name, ".lock")) |key| return key;
-    const stem =
-        // Archive file
-        std.mem.cutSuffix(u8, name, ".tar.xz") orelse
-        std.mem.cutSuffix(u8, name, ".zip") orelse
-        // Extracted directory
-        name;
-    const target1 = std.fmt.comptimePrint("zig-{t}-{t}-", .{ builtin.cpu.arch, builtin.os.tag }); // 0.14.1 and above
-    const target2 = std.fmt.comptimePrint("zig-{t}-{t}-", .{ builtin.os.tag, builtin.cpu.arch }); // 0.14.0 and below
-    const version =
-        std.mem.cutPrefix(u8, stem, target1) orelse
-        std.mem.cutPrefix(u8, stem, target2) orelse
-        // Unknown version
-        return "master";
-    // If a custom version doesn't follow semver, returning "master" ensures that
-    // locking still works, at the cost of overzealous locking.
-    const semver = std.SemanticVersion.parse(version) catch return "master";
-    // master should have both `build` and/or `pre` fields set.
-    // Unfortunately this is also the case for Mach's nominated Zig versions,
-    // and we have no way of infering "2026.4.10-mach" from "0.16.0-dev.3142+5ccfeb926"
-    // without scanning through Mach's index.
-    // However that is a bandaid solution that fails if other indexes share those versions.
-    // Thus, we always return "master" to play safe.
-    if (semver.build != null or semver.pre != null) return "master";
-    return version;
-}
-
-/// `tmp_dir` must be opened with `.iterate = true`.
-fn cleanUpTmpDir(io: Io, tmp_dir: Dir) void {
-    var fba_buf: [Dir.max_name_bytes]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&fba_buf);
-    const allocator = fba.allocator();
-
-    var iter = tmp_dir.iterate();
-    while (iter.next(io) catch return) |entry| {
-        switch (entry.kind) {
-            .directory, .file => {},
-            else => continue,
-        }
-
-        const key = keyFromFilename(entry.name);
-        const lock = LockFile.tryLock(allocator, io, tmp_dir, key) catch |err| switch (err) {
-            error.Canceled => return,
-            else => continue,
-        };
-        defer lock.unlock(allocator, io);
-        _ = switch (entry.kind) {
-            .directory => tmp_dir.deleteTree(io, entry.name),
-            .file => tmp_dir.deleteFile(io, entry.name),
-            else => unreachable,
-        } catch |err| switch (err) {
-            error.Canceled => return,
-            else => continue,
-        };
-    }
-}
-
 /// Installs the zig version into a subfolder in `versions_path`.
 /// The comparessed tarball is temporarily stored in `tmp_dir`.
 fn installZig(
@@ -115,6 +56,9 @@ fn installZig(
     const versions_dir = Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
         fatal("Failed to create versions directory: {t}", .{err});
     defer versions_dir.close(io);
+    const dir = lock.getLockedDir(io, .{}) catch |err|
+        fatal("Failed to create temporary directory: {t}", .{err});
+    defer dir.close(io);
 
     var rng: Rng = rng: {
         var seed: [Rng.secret_seed_length]u8 = undefined;
@@ -135,7 +79,7 @@ fn installZig(
         if (Dir.path.isSep(c)) fatal("Invalid tarball name: {s}\n", .{tarball_info.name});
     }
 
-    const archive_file = tmp_dir.createFile(io, tarball_info.name, .{ .read = true }) catch |err|
+    const archive_file = dir.createFile(io, tarball_info.name, .{ .read = true }) catch |err|
         fatal("Failed to create tarball file: {t}", .{err});
     defer archive_file.close(io);
     archive_file.setLength(io, tarball_info.size) catch {};
@@ -151,14 +95,15 @@ fn installZig(
     }
 
     log.info("Extracting tarball...", .{});
-    files.extractZigTarball(allocator, io, versions_dir, tmp_dir, archive_file, tarball_info.name, version) catch |err|
+    files.extractZigTarball(allocator, io, versions_dir, dir, archive_file, tarball_info.name, version) catch |err|
         fatal("Failed to extract tarball: {t}", .{err});
 
     log.info("Successfully installed zig {s}!", .{version});
 
     log.info("Cleaning up extracted tarball...", .{});
-    tmp_dir.deleteFile(io, tarball_info.name) catch {};
-    cleanUpTmpDir(io, tmp_dir);
+    dir.deleteFile(io, tarball_info.name) catch {};
+
+    LockFile.cleanUpUnlocked(io, lock.dir);
 }
 
 /// Returns the zig version from `zon_path`, or null if the path does not exist.
@@ -474,7 +419,7 @@ pub fn main(init: std.process.Init.Minimal) void {
 
             // Clean up while waiting for user input
             tmp_dir = files.openTmpDir(io, base_dir) catch null;
-            var cleanup_task = if (tmp_dir) |d| io.async(cleanUpTmpDir, .{ io, d }) else null;
+            var cleanup_task = if (tmp_dir) |d| io.async(LockFile.cleanUpUnlocked, .{ io, d }) else null;
             defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
             if (!(term.isatty(stdin.file.handle) catch false)) {
                 break :blk EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
@@ -506,7 +451,7 @@ pub fn main(init: std.process.Init.Minimal) void {
 
         // Clean up while waiting for user input
         tmp_dir = files.openTmpDir(io, base_dir) catch null;
-        var cleanup_task = if (tmp_dir) |d| io.async(cleanUpTmpDir, .{ io, d }) else null;
+        var cleanup_task = if (tmp_dir) |d| io.async(LockFile.cleanUpUnlocked, .{ io, d }) else null;
         defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
         const confirmed = if (term.isatty(stdin.file.handle) catch false)
             confirmInstallPrompt(
