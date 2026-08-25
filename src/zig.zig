@@ -48,7 +48,7 @@ fn installZig(
     if (files.isNewestVersionInstalled(io, index, versions_path, version) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
     }) {
-        return;
+        return; // Someone else installed it for us
     }
 
     log.info("Fetching Zig version {s}...", .{version});
@@ -285,6 +285,8 @@ fn getCompatibleZigVersion(index: []const u8, version: []const u8) ?[]const u8 {
     while (index_iter.next() catch
         fatal("Unexpected format for index file. Please update your zxc version.", .{})) |entry|
     {
+        if (std.mem.eql(u8, version, entry.name)) return version;
+        if (entry.version) |v| if (std.mem.eql(u8, version, v)) return version;
         if (wanted_semver) |wanted| {
             const online = SemVer.parse(entry.version orelse entry.name) catch continue;
             if (wanted.major != online.major or wanted.minor != online.minor) continue;
@@ -293,9 +295,6 @@ fn getCompatibleZigVersion(index: []const u8, version: []const u8) ?[]const u8 {
                 if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
             }
             compatible_version = entry.name;
-        } else {
-            if (std.mem.eql(u8, version, entry.name)) return version;
-            if (entry.version) |v| if (std.mem.eql(u8, version, v)) return version;
         }
     }
 
@@ -435,7 +434,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         };
 
         if (files.isZigVersionInstalled(io, versions_path, version)) break :ver .{ version, true };
-        if (files.installedMasterVersion(io, versions_path, &master_ver_buf)) |mv| blk: {
+        if (files.probeInstalledVersion(io, versions_path, "master", &master_ver_buf)) |mv| blk: {
             const wanted = std.SemanticVersion.parse(version) catch break :blk;
             const master = std.SemanticVersion.parse(mv) catch break :blk;
             if (wanted.major == master.major and wanted.minor == master.minor) {
@@ -482,6 +481,9 @@ pub fn main(init: std.process.Init.Minimal) void {
         break :ver .{ actual_version, false };
     };
     if (!installed) {
+        if (!LockFile.isValidKey(zig_version)) {
+            fatal("Zig version cannot start with 'lock.'", .{});
+        }
         if (tmp_dir == null) {
             tmp_dir = files.openTmpDir(io, base_dir) catch |err|
                 fatal("Failed to create temporary directory: {t}", .{err});

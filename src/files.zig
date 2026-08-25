@@ -164,17 +164,6 @@ pub const InstalledZigIterator = struct {
         }
         return null;
     }
-
-    /// Adds all installed versions into the set.
-    /// Added versions are not freed on error.
-    pub fn collectSet(io: Io, versions_dir: Dir, set: *std.StringHashMap(void)) Allocator.Error!void {
-        var iter: InstalledZigIterator = .init(versions_dir);
-        while (iter.next(io)) |version| {
-            const name = try set.allocator.dupe(u8, version);
-            errdefer set.allocator.free(name);
-            try set.put(name, {});
-        }
-    }
 };
 
 /// Joins the paths in `paths` with the existing path `buf[0..base_len]`.
@@ -218,41 +207,47 @@ pub fn isZigVersionInstalledDir(io: Io, versions_dir: Dir, version: []const u8) 
     return true;
 }
 
-/// Similar to `isZigVersionInstalled`, but checks if installed master version
-/// is the latest when `version` is "master".
-/// Assumes `index` contains the latest master version.
+/// Similar to `isZigVersionInstalled`, but checks if installed version
+/// is the latest when `version` is not a semantic version (i.e., assumed to be a rolling release).
+/// Assumes `index` contains the latest version.
 pub fn isNewestVersionInstalled(
     io: Io,
     index: []const u8,
     versions_path: []const u8,
     version: []const u8,
 ) !bool {
-    if (!std.mem.eql(u8, version, "master")) {
+    const is_semver = !std.meta.isError(std.SemanticVersion.parse(version));
+    if (is_semver) {
         return isZigVersionInstalled(io, versions_path, version);
     }
 
-    var buf: [64]u8 = undefined;
-    const installed_version = installedMasterVersion(io, versions_path, &buf) orelse return false;
+    var probe_buf: [64]u8 = undefined;
+    const installed_version = probeInstalledVersion(io, versions_path, version, &probe_buf) orelse return false;
     var iter: IndexIterator = undefined;
     try iter.init(index);
     while (try iter.next()) |zig| {
-        if (!std.mem.eql(u8, zig.name, "master")) continue;
+        if (!std.mem.eql(u8, zig.name, version)) continue;
         if (zig.version == null) return false;
         return std.mem.eql(u8, zig.version.?, installed_version);
     }
     return false;
 }
 
-/// Returns the actual version of "master" if it is installed, or `null` otherwise.
+/// Returns the actual version of `version` if it is installed, or `null` otherwise.
 /// `buffer` is used to store the result.
-pub fn installedMasterVersion(io: Io, versions_path: []const u8, buffer: []u8) ?[]const u8 {
+pub fn probeInstalledVersion(
+    io: Io,
+    versions_path: []const u8,
+    version: []const u8,
+    buffer: []u8,
+) ?[]const u8 {
     assert(Dir.path.isAbsolute(versions_path));
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
     const path = Dir.path.join(
         fba.allocator(),
-        &.{ versions_path, "master", ZIG_NAME },
+        &.{ versions_path, version, ZIG_NAME },
     ) catch return null;
     var zig_proc = std.process.spawn(io, .{
         .argv = &.{ path, "version" },
@@ -264,12 +259,60 @@ pub fn installedMasterVersion(io: Io, versions_path: []const u8, buffer: []u8) ?
 
     var reader = zig_proc.stdout.?.readerStreaming(io, buffer);
     return reader.interface.takeDelimiter('\n') catch |err| {
-        log.warn("Failed to probe installed master verion: {t}", .{switch (err) {
-            error.ReadFailed => reader.err.?,
-            else => err,
-        }});
+        log.warn("Failed to probe installed {s} version: {t}", .{
+            version,
+            switch (err) {
+                error.ReadFailed => reader.err.?,
+                else => err,
+            },
+        });
         return null;
     };
+}
+
+/// Appends installed Zig versions to `versions`,
+/// and returns a mapping of name to index inside `versions`.
+fn collectInstalledVersions(
+    allocator: Allocator,
+    io: Io,
+    versions: *std.ArrayList(ZigVersion),
+    versions_dir: Dir,
+    versions_path: []const u8,
+) !std.StringHashMap(usize) {
+    const old_len = versions.items.len;
+    var installed: std.StringHashMap(usize) = .init(allocator);
+    errdefer {
+        for (versions.items[old_len..]) |item| {
+            allocator.free(item.name);
+            if (item.version) |v| allocator.free(v);
+        }
+        versions.shrinkRetainingCapacity(old_len);
+        installed.deinit();
+    }
+
+    var iter: InstalledZigIterator = .init(versions_dir);
+    while (iter.next(io)) |name| {
+        const is_semver = !std.meta.isError(std.SemanticVersion.parse(name));
+        const version = blk: {
+            if (is_semver) break :blk null;
+            var probe_buf: [64]u8 = undefined;
+            const v = probeInstalledVersion(io, versions_path, name, &probe_buf) orelse break :blk null;
+            if (std.mem.eql(u8, name, v)) break :blk null;
+            break :blk try allocator.dupe(u8, v);
+        };
+        errdefer if (version) |v| allocator.free(v);
+
+        const duped_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(duped_name);
+        try installed.put(duped_name, versions.items.len);
+        try versions.append(allocator, .{
+            .name = duped_name,
+            .version = version,
+            .installed = true,
+        });
+    }
+
+    return installed;
 }
 
 /// Returns all Zig verisons, both installed and online, without duplicates.
@@ -280,6 +323,9 @@ pub fn getAllVersions(
     versions_path: []const u8,
     index: []const u8,
 ) ![]ZigVersion {
+    var versions: std.ArrayList(ZigVersion) = .empty;
+    errdefer versions.deinit(allocator);
+
     const versions_dir = Dir.openDirAbsolute(
         io,
         versions_path,
@@ -289,54 +335,25 @@ pub fn getAllVersions(
         else => |e| return e,
     };
     defer if (versions_dir) |vd| vd.close(io);
-
-    var installed: std.StringHashMap(void) = .init(allocator);
-    if (versions_dir) |vd| {
-        try InstalledZigIterator.collectSet(io, vd, &installed);
-    }
-
-    const master_ver_buf = try allocator.alloc(u8, 64);
-    const master_ver = if (installed.contains("master"))
-        installedMasterVersion(io, versions_path, master_ver_buf)
+    var installed: std.StringHashMap(usize) = if (versions_dir) |vd|
+        try collectInstalledVersions(allocator, io, &versions, vd, versions_path)
     else
-        null;
-
-    return getAllVersionsInner(allocator, master_ver, index, installed);
-}
-
-/// Returns all Zig verisons, both installed and online, without duplicates.
-/// Strings inside the result point inside `master_ver`, `index` and `installed_names`,
-/// rather than being allocated seperately.
-pub fn getAllVersionsInner(
-    allocator: Allocator,
-    master_ver: ?[]const u8,
-    index: []const u8,
-    installed_names: std.StringHashMap(void),
-) ![]ZigVersion {
-    var versions: std.ArrayList(ZigVersion) = .empty;
-    errdefer versions.deinit(allocator);
-
-    var installed_iter = installed_names.keyIterator();
-    while (installed_iter.next()) |name| {
-        try versions.append(allocator, .{
-            .name = name.*,
-            .version = if (std.mem.eql(u8, name.*, "master")) master_ver else null,
-            .installed = true,
-        });
-    }
+        .init(allocator);
+    defer installed.deinit();
 
     var index_iter: IndexIterator = undefined;
     try index_iter.init(index);
     while (try index_iter.next()) |entry| {
-        if (installed_names.contains(entry.name)) {
-            if (!std.mem.eql(u8, entry.name, "master")) continue;
-            if (master_ver != null and
-                entry.version != null and
-                std.mem.eql(u8, master_ver.?, entry.version.?)) continue;
+        const is_semver = !std.meta.isError(std.SemanticVersion.parse(entry.name));
+        if (installed.get(entry.name)) |idx| blk: {
+            if (is_semver) continue;
+            const old_ver = versions.items[idx].version orelse break :blk;
+            const new_ver = entry.version orelse break :blk;
+            if (std.mem.eql(u8, old_ver, new_ver)) continue;
         }
         try versions.append(allocator, .{
             .name = entry.name,
-            .version = if (entry.version != null and !std.mem.eql(u8, entry.name, entry.version.?))
+            .version = if (entry.version != null and !is_semver)
                 entry.version.?
             else
                 null,
@@ -344,7 +361,7 @@ pub fn getAllVersionsInner(
         });
     }
 
-    return versions.toOwnedSlice(allocator);
+    return try versions.toOwnedSlice(allocator);
 }
 
 pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
