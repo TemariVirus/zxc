@@ -1,6 +1,9 @@
 const std = @import("std");
 const log = std.log.default;
 const Io = std.Io;
+const Dir = Io.Dir;
+const File = Io.File;
+const EnvMap = std.process.Environ.Map;
 const fatal = std.process.fatal;
 
 const lexopts = @import("lexopts");
@@ -8,9 +11,13 @@ const options = @import("options");
 
 const files = @import("files.zig");
 const fs = @import("fs.zig");
+const http = @import("http.zig");
+const term = @import("term.zig");
+const LockFile = @import("LockFile.zig");
 
 const Args = union(enum) {
     help: void,
+    install: InstallArgs,
     ls: LsArgs,
     rm: RmArgs,
     version: void,
@@ -22,6 +29,7 @@ const Args = union(enum) {
         \\Run `zxc COMMAND --help` for command-specific help.
         \\
         \\Commands:
+        \\  i, install  Install a Zig version.
         \\  ls          List Zig versions.
         \\  rm          Delete an installed Zig version.
         \\  version     Prints the program's version.
@@ -40,14 +48,77 @@ const Args = union(enum) {
                     p.unknownOpt();
                 },
                 .pos_arg => |cmd| {
+                    if (std.mem.eql(u8, cmd, "i") or std.mem.eql(u8, cmd, "install")) return .{ .install = .parse(p) };
                     if (std.mem.eql(u8, cmd, "ls")) return .{ .ls = .parse(p) };
                     if (std.mem.eql(u8, cmd, "rm")) return .{ .rm = .parse(p) };
                     if (std.mem.eql(u8, cmd, "version")) return .version;
-                    std.process.fatal("Unknown command '{s}'. Run `zxc --help` for a list of commands.", .{cmd});
+                    fatal("Unknown command '{s}'. Run `zxc --help` for a list of commands.", .{cmd});
                 },
             }
         }
         return null;
+    }
+};
+
+const InstallArgs = struct {
+    /// Valid semantic version, or "master".
+    version: []const u8 = "",
+    path: []const u8 = "",
+    force: bool = false,
+    help: bool = false,
+
+    pub const help_text =
+        \\Usage: zxc install [options] VERSION PATH
+        \\
+        \\Install a Zig version from the tarball or folder at PATH.
+        \\VERSION should match the expected .minimum_zig_version field of build.zig.zon
+        \\
+        \\Supported tarball formats: .tar.xz, .zip
+        \\
+        \\Options:
+        \\  -f, --force  Overwrite the already installed version, if it exists.
+        \\  -h, --help   Print this help message.
+        \\
+    ;
+
+    pub fn parse(p: *lexopts.Parser) InstallArgs {
+        var args: InstallArgs = .{};
+        while (p.next() catch |err| parserErr(p, err)) |arg| {
+            switch (arg) {
+                .option => |opt| {
+                    if (opt.match("-f") or opt.match("--force")) {
+                        args.force = true;
+                    } else if (opt.match("-h") or opt.match("--help")) {
+                        return .{ .help = true };
+                    } else {
+                        p.unknownOpt();
+                    }
+                },
+                .pos_arg => |value| {
+                    if (args.version.len == 0) {
+                        args.version = value;
+                    } else if (args.path.len == 0) {
+                        args.path = value;
+                    } else {
+                        fatal("Too many arguments.", .{});
+                    }
+                },
+            }
+        }
+
+        if (args.version.len == 0) {
+            fatal("Missing VERSION argument.", .{});
+        }
+        const is_semver = !std.meta.isError(std.SemanticVersion.parse(args.version));
+        if (!LockFile.isValidKey(args.version) or
+            (!std.mem.eql(u8, args.version, "master") and !is_semver))
+        {
+            fatal("Invalid version {s}\nVERSION argument must be a semantic version, or \"master\".", .{args.version});
+        }
+        if (args.path.len == 0) {
+            fatal("Missing PATH argument.", .{});
+        }
+        return args;
     }
 };
 
@@ -79,7 +150,7 @@ const LsArgs = struct {
                         p.unknownOpt();
                     }
                 },
-                .pos_arg => std.process.fatal("`zxc ls` does not accept arguments. Run `zxc ls --help` for help.", .{}),
+                .pos_arg => fatal("`zxc ls` does not accept arguments. Run `zxc ls --help` for help.", .{}),
             }
         }
         return args;
@@ -118,7 +189,7 @@ const RmArgs = struct {
         };
 
         if (!has_version) {
-            std.process.fatal("Missing VERSIONS argument(s).", .{});
+            fatal("Missing VERSIONS argument(s).", .{});
         }
         p.* = old_parser;
         return args;
@@ -143,10 +214,94 @@ fn parserErr(p: *const lexopts.Parser, err: lexopts.LexoptsError) noreturn {
     }
 }
 
+fn installCmd(
+    allocator: std.mem.Allocator,
+    io: Io,
+    env_map: *const EnvMap,
+    opts: InstallArgs,
+) void {
+    var stdout_buf: [1024]u8 = undefined;
+    var stdout = File.stdout().writer(io, &stdout_buf);
+    if (opts.help) {
+        stdout.interface.writeAll(InstallArgs.help_text) catch {};
+        return stdout.flush() catch {};
+    }
+
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err});
+    const versions_dir = blk: {
+        const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+            fatal("Out of memory", .{});
+        break :blk Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
+            fatal("Unable to open versions folder: {t}", .{err});
+    };
+    defer versions_dir.close(io);
+    const tmp_dir = blk: {
+        const tmp_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{"tmp"}) catch
+            fatal("Out of memory", .{});
+        break :blk Dir.createDirPathOpen(.cwd(), io, tmp_path, .{}) catch |err|
+            fatal("Unable to open temporary folder: {t}", .{err});
+    };
+    defer tmp_dir.close(io);
+
+    const lock = LockFile.lock(allocator, io, tmp_dir, opts.version) catch |err|
+        fatal("Failed to create file lock: {t}", .{err});
+    defer lock.unlock(allocator, io);
+    if (!opts.force and files.isZigVersionInstalledDir(io, versions_dir, opts.version)) {
+        fatal("Zig version {s} is already installed. Add the --force flag to overwrite it.", .{opts.version});
+    }
+
+    const work_dir = lock.getLockedDir(io, .{}) catch |err|
+        fatal("Failed to create temporary directory: {t}", .{err});
+    defer {
+        work_dir.close(io);
+        tmp_dir.deleteTree(io, opts.version) catch {};
+    }
+
+    const archive_file = Dir.cwd().openFile(io, opts.path, .{
+        .allow_directory = false,
+        .follow_symlinks = true,
+        .resolve_beneath = false,
+    }) catch |err| switch (err) {
+        error.IsDir => null,
+        else => fatal("Unable to open {s}: {t}", .{ opts.path, err }),
+    };
+    defer if (archive_file) |f| f.close(io);
+
+    const old_name = if (archive_file) |f| name: {
+        const filename = Dir.path.basename(opts.path);
+        log.info("Extracting '{s}'...", .{filename});
+        const extracted_name = files.extractZigTarball(allocator, io, f, filename, work_dir) catch |err|
+            fatal("Failed to extract '{s}': {t}", .{ filename, err });
+        if (!files.isZigVersionInstalledDir(io, work_dir, extracted_name)) {
+            fatal(
+                \\'{s}' had an unexpected directory structure or is incompatible with your system.
+                \\Installable tarballs must have the same structure as the official tarballs.
+            , .{filename});
+        }
+        break :name extracted_name;
+    } else name: {
+        if (!files.isZigVersionInstalledDir(io, .cwd(), opts.path)) {
+            fatal("'{s}' does not contain an executable {s} file.", .{ opts.path, files.ZIG_NAME });
+        }
+        log.info("Copying '{s}'...", .{opts.path});
+        fs.copyTree(.cwd(), opts.path, work_dir, opts.version, null, io) catch |err|
+            fatal("Failed to copy '{s}': {t}", .{ opts.path, err });
+        break :name opts.version;
+    };
+
+    fs.forceRename(work_dir, old_name, versions_dir, opts.version, io) catch |err|
+        fatal("Failed to install {s}: {t}", .{ opts.version, err });
+
+    stdout.interface.print("Installed {s}!\n", .{opts.version}) catch {};
+    stdout.flush() catch {};
+}
+
 fn lsAll(
     allocator: std.mem.Allocator,
     io: Io,
-    base_dir: Io.Dir,
+    base_dir: Dir,
     versions_path: []const u8,
     stdout: *Io.Writer,
 ) void {
@@ -175,24 +330,24 @@ fn lsAll(
 fn lsCmd(
     allocator: std.mem.Allocator,
     io: Io,
-    env_map: *const std.process.Environ.Map,
+    env_map: *const EnvMap,
     opts: LsArgs,
 ) void {
-    var stdout_buf: [64]u8 = undefined;
-    var stdout = Io.File.stdout().writer(io, &stdout_buf);
+    var stdout_buf: [1024]u8 = undefined;
+    var stdout = File.stdout().writer(io, &stdout_buf);
     if (opts.help) {
         stdout.interface.writeAll(LsArgs.help_text) catch {};
         return stdout.flush() catch {};
     }
 
-    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
         fatal("Failed to locate base dir: {t}", .{err});
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory", .{});
 
     if (opts.all) {
-        const base_dir = Io.Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
+        const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
             fatal("Failed to open base dir '{s}': {t}", .{ base_path, err });
         defer base_dir.close(io);
         return lsAll(allocator, io, base_dir, versions_path, &stdout.interface);
@@ -220,26 +375,26 @@ fn lsCmd(
     stdout.flush() catch {};
 }
 
-fn rmCmd(io: Io, env_map: *const std.process.Environ.Map, opts: RmArgs) void {
-    var stdout_buf: [64]u8 = undefined;
-    var stdout = Io.File.stdout().writer(io, &stdout_buf);
+fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
+    var stdout_buf: [1024]u8 = undefined;
+    var stdout = File.stdout().writer(io, &stdout_buf);
     if (opts.help) {
         stdout.interface.writeAll(RmArgs.help_text) catch {};
         return stdout.flush() catch {};
     }
 
-    var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
         fatal("Failed to locate base dir: {t}", .{err});
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory", .{});
 
-    const versions_dir = Io.Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
+    const versions_dir = Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
         fatal("Unable to open versions folder: {t}", .{err});
     defer versions_dir.close(io);
     version_loop: while (opts.nextVersion()) |version| {
         // Prevent path traversal
-        for (version) |c| if (Io.Dir.path.isSep(c)) {
+        for (version) |c| if (Dir.path.isSep(c)) {
             log.err("Invalid version: {s}", .{version});
             continue :version_loop;
         };
@@ -253,14 +408,12 @@ fn rmCmd(io: Io, env_map: *const std.process.Environ.Map, opts: RmArgs) void {
     }
 }
 
-// TODO: add command to allow users to add their own version
-// This is as simple as copying the folder into the versions directory
 // TODO: add command to get path to current zig executable
 pub fn main(init: std.process.Init) void {
     const gpa = init.gpa;
     const io = init.io;
 
-    var stdout = Io.File.stdout().writer(io, &.{});
+    var stdout = File.stdout().writer(io, &.{});
     const argv = init.minimal.args.toSlice(init.arena.allocator()) catch
         fatal("Out of memory while parsing args", .{});
     var parser: lexopts.Parser = .init(argv);
@@ -274,8 +427,22 @@ pub fn main(init: std.process.Init) void {
         stderr.file_writer.interface.writeAll(Args.help_text) catch {};
         std.process.exit(1);
     };
+
+    var cleanup_task = task: switch (args) {
+        .help, .version => null, // Operation too short
+        else => {
+            var path_buf: [Dir.max_path_bytes]u8 = undefined;
+            const base_path = files.getBasePath(io, init.environ_map, &path_buf) catch break :task null;
+            const tmp_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{"tmp"}) catch break :task null;
+            const tmp_dir = Dir.openDirAbsolute(io, tmp_path, .{ .iterate = true }) catch break :task null;
+            break :task io.concurrent(LockFile.cleanUpUnlocked, .{ io, tmp_dir }) catch null;
+        },
+    };
+    defer if (cleanup_task) |*t| t.cancel(io);
+
     switch (args) {
         .help => stdout.interface.writeAll(Args.help_text) catch {},
+        .install => |opts| installCmd(gpa, io, init.environ_map, opts),
         .ls => |opts| lsCmd(gpa, io, init.environ_map, opts),
         .rm => |opts| rmCmd(io, init.environ_map, opts),
         .version => stdout.interface.writeAll(options.version ++ "\n") catch {},

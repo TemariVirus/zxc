@@ -4,7 +4,6 @@ const log = std.log.default;
 const Allocator = std.mem.Allocator;
 const Dir = Io.Dir;
 const Io = std.Io;
-const Rng = std.Random.ChaCha;
 const fatal = std.process.fatal;
 
 const KeyReader = @import("KeyReader.zig");
@@ -35,7 +34,7 @@ fn installZig(
     client: *std.http.Client,
     tmp_dir: Dir,
     versions_path: []const u8,
-    mirrors: [][]const u8,
+    mirrors: []const []const u8,
     index: []const u8,
     version: []const u8,
     stdout: *Io.Writer,
@@ -57,16 +56,9 @@ fn installZig(
     const versions_dir = Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
         fatal("Failed to create versions directory: {t}", .{err});
     defer versions_dir.close(io);
-    const dir = lock.getLockedDir(io, .{}) catch |err|
+    const work_dir = lock.getLockedDir(io, .{}) catch |err|
         fatal("Failed to create temporary directory: {t}", .{err});
-    defer dir.close(io);
-
-    var rng: Rng = rng: {
-        var seed: [Rng.secret_seed_length]u8 = undefined;
-        io.random(&seed);
-        break :rng .init(seed);
-    };
-    rng.random().shuffle([]const u8, mirrors);
+    defer work_dir.close(io);
 
     const tarball_info = files.getTarballInfo(index, version, files.SELF_TARGET) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
@@ -80,7 +72,7 @@ fn installZig(
         if (Dir.path.isSep(c)) fatal("Invalid tarball name: {s}\n", .{tarball_info.name});
     }
 
-    const archive_file = dir.createFile(io, tarball_info.name, .{ .read = true }) catch |err|
+    const archive_file = work_dir.createFile(io, tarball_info.name, .{ .read = true }) catch |err|
         fatal("Failed to create tarball file: {t}", .{err});
     defer archive_file.close(io);
     archive_file.setLength(io, tarball_info.size) catch {};
@@ -96,15 +88,15 @@ fn installZig(
     }
 
     log.info("Extracting tarball...", .{});
-    const extracted_name = files.extractZigTarball(allocator, io, dir, archive_file, tarball_info.name) catch |err|
+    const extracted_name = files.extractZigTarball(allocator, io, archive_file, tarball_info.name, work_dir) catch |err|
         fatal("Failed to extract tarball: {t}", .{err});
-    fs.forceRename(dir, extracted_name, versions_dir, version, io) catch |err|
+    fs.forceRename(work_dir, extracted_name, versions_dir, version, io) catch |err|
         fatal("Failed to install extracted tarball: {t}", .{err});
 
     log.info("Successfully installed zig {s}!", .{version});
 
     log.info("Cleaning up extracted tarball...", .{});
-    dir.deleteFile(io, tarball_info.name) catch {};
+    work_dir.deleteFile(io, tarball_info.name) catch {};
 
     LockFile.cleanUpUnlocked(io, lock.dir);
 }

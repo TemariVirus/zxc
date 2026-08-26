@@ -7,6 +7,7 @@ const minizign = @import("minizign");
 const options = @import("options");
 
 const files = @import("files.zig");
+const term = @import("term.zig");
 
 const NAME = "zxc";
 const MAX_MIRROR_URL_LEN = 512;
@@ -127,33 +128,6 @@ fn fetchSignature(
     return signature;
 }
 
-const DownloadProgress = struct {
-    io: std.Io,
-    start_t: std.Io.Timestamp,
-    downloaded: u64 = 0,
-    total: u64,
-
-    pub fn start(io: std.Io, total: u64) DownloadProgress {
-        return DownloadProgress{
-            .io = io,
-            .start_t = .now(io, .real),
-            .total = total,
-        };
-    }
-
-    pub fn writeProgress(self: DownloadProgress, stdout: *std.Io.Writer, last: bool) !void {
-        const CLEAR_LINE = "\r\x1b[K";
-        const dur = self.start_t.untilNow(self.io, .real);
-        const bytes_per_s: u64 = @intCast(std.time.ns_per_s * @as(u96, self.downloaded) / @max(1, dur.nanoseconds));
-        try stdout.print(
-            CLEAR_LINE ++ "Downloaded {B: >8.2} of {B:.2} ({B:.2}/s)",
-            .{ self.downloaded, self.total, bytes_per_s },
-        );
-        if (last) try stdout.writeByte('\n');
-        try stdout.flush();
-    }
-};
-
 /// Fetches the tarball from the given mirror, writing it to `writer`.
 /// Download progress is printed to `stdout`.
 fn fetchZigTarball(
@@ -164,27 +138,22 @@ fn fetchZigTarball(
     stdout: *std.Io.Writer,
 ) !void {
     var url_buf: [MAX_MIRROR_URL_LEN]u8 = undefined;
-    // We know this will parse correctly because it ran sucessfully earlier in fetchSignature()
-    const url = std.mem.print(&url_buf, "{s}/{s}", .{ mirror_url, tarball.name }) catch unreachable;
+    const url = try std.mem.print(&url_buf, "{s}/{s}", .{ mirror_url, tarball.name });
     var uri = std.Uri.parse(url) catch unreachable;
     uri.query = .{ .percent_encoded = "source=" ++ NAME };
 
     const result = try fetch(client, uri);
     defer result.deinit();
 
-    var progress: DownloadProgress = .start(client.io, tarball.size);
-    while (true) {
-        progress.downloaded += result.reader.stream(writer, .unlimited) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return result.getReadErr(),
-            error.WriteFailed => |e| return e,
-        };
-        progress.writeProgress(stdout, false) catch {};
-        if (progress.downloaded > tarball.size) return error.WrongSizeForTarball;
-    }
-    progress.writeProgress(stdout, true) catch {};
-    if (progress.downloaded != tarball.size) return error.WrongSizeForTarball;
-    try writer.flush();
+    term.DownloadProgress.streamResultAndWriteProgress(
+        result,
+        writer,
+        stdout,
+        tarball.size,
+    ) catch |err| switch (err) {
+        error.WrongSize => return error.WrongSizeForTarball,
+        else => |e| return e,
+    };
 }
 
 /// If we get one of these errors while downloading from a mirror,

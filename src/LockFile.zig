@@ -11,12 +11,12 @@ dir: Dir,
 file: Io.File,
 name: []const u8,
 
-pub fn isValidKey(name: []const u8) bool {
-    return !std.mem.startsWith(u8, name, "lock.");
+pub fn isValidKey(key: []const u8) bool {
+    return !std.mem.startsWith(u8, key, "lock.") and
+        Dir.path.basename(key).len == key.len;
 }
 
-fn getNameFromKey(allocator: Allocator, key: []const u8) ![]const u8 {
-    std.debug.assert(Dir.path.basename(key).len == key.len);
+fn getNameFromKey(allocator: Allocator, key: []const u8) Allocator.Error![]const u8 {
     std.debug.assert(isValidKey(key));
     const path = try allocator.alloc(u8, 5 + key.len);
     @memcpy(path[0..5], "lock.");

@@ -350,6 +350,14 @@ fn getMirrorsIfValid(
     if (mirrors.items.len != line_count) {
         return error.BadMirrorsFile;
     }
+
+    const Rng = std.Random.ChaCha;
+    var rng: Rng = rng: {
+        var seed: [Rng.secret_seed_length]u8 = undefined;
+        io.random(&seed);
+        break :rng .init(seed);
+    };
+    rng.random().shuffle([]const u8, mirrors.items);
     return mirrors.items;
 }
 
@@ -431,16 +439,16 @@ pub fn getTarballInfo(index: []const u8, zig_version: []const u8, target: []cons
 pub fn extractZigTarball(
     allocator: Allocator,
     io: Io,
-    dir: Dir,
     tarball: Io.File,
     tarball_name: []const u8,
+    dir: Dir,
 ) ![]const u8 {
     const buf = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(buf);
     var reader = tarball.reader(io, buf);
 
     const tarball_format = ArchiveFormat.fromFileName(tarball_name) orelse
-        return error.UnsupportedTarballFormat;
+        return error.UnsupportedFormat;
     const dir_name = switch (tarball_format) {
         .xz => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
         .zip => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
