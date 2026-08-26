@@ -58,7 +58,11 @@ fn installZig(
     defer versions_dir.close(io);
     const work_dir = lock.getLockedDir(io, .{}) catch |err|
         fatal("Failed to create temporary directory: {t}", .{err});
-    defer work_dir.close(io);
+    defer {
+        work_dir.close(io);
+        log.info("Cleaning up extracted tarball...", .{});
+        tmp_dir.deleteFile(io, version) catch {};
+    }
 
     const tarball_info = files.getTarballInfo(index, version, files.SELF_TARGET) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
@@ -94,11 +98,6 @@ fn installZig(
         fatal("Failed to install extracted tarball: {t}", .{err});
 
     log.info("Successfully installed zig {s}!", .{version});
-
-    log.info("Cleaning up extracted tarball...", .{});
-    work_dir.deleteFile(io, tarball_info.name) catch {};
-
-    LockFile.cleanUpUnlocked(io, lock.dir);
 }
 
 /// Returns the zig version from `zon_path`, or null if the path does not exist.
@@ -498,6 +497,7 @@ pub fn main(init: std.process.Init.Minimal) void {
             zig_version,
             &stdout.interface,
         );
+        LockFile.cleanUpUnlocked(io, tmp_dir.?);
     }
 
     argv[0] = fs.joinPathsInPlace(
