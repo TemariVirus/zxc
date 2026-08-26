@@ -428,7 +428,7 @@ pub fn getTarballInfo(index: []const u8, zig_version: []const u8, target: []cons
 
     return if (std.mem.cutScalarLast(u8, url.?, '/')) |cuts|
         TarballInfo{
-            .fallback_url = url.?,
+            .fallback_url = cuts[0],
             .name = cuts[1],
             .size = size.?,
         }
