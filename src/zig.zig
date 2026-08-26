@@ -10,6 +10,7 @@ const fatal = std.process.fatal;
 const KeyReader = @import("KeyReader.zig");
 const LockFile = @import("LockFile.zig");
 const files = @import("files.zig");
+const fs = @import("fs.zig");
 const http = @import("http.zig");
 const term = @import("term.zig");
 
@@ -95,8 +96,10 @@ fn installZig(
     }
 
     log.info("Extracting tarball...", .{});
-    files.extractZigTarball(allocator, io, versions_dir, dir, archive_file, tarball_info.name, version) catch |err|
+    const extracted_name = files.extractZigTarball(allocator, io, dir, archive_file, tarball_info.name) catch |err|
         fatal("Failed to extract tarball: {t}", .{err});
+    fs.forceRename(dir, extracted_name, versions_dir, version, io) catch |err|
+        fatal("Failed to install extracted tarball: {t}", .{err});
 
     log.info("Successfully installed zig {s}!", .{version});
 
@@ -396,7 +399,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, &environ_map, &path_buf) catch |err|
         fatal("Failed to locate base dir: {t}", .{err});
-    const versions_path = files.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory", .{});
 
     const base_dir = files.openBaseDir(io, &environ_map);
@@ -505,7 +508,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         );
     }
 
-    argv[0] = files.joinPathsInPlace(
+    argv[0] = fs.joinPathsInPlace(
         &path_buf,
         versions_path.len,
         &.{ zig_version, files.ZIG_NAME },

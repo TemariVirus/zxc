@@ -7,6 +7,7 @@ const lexopts = @import("lexopts");
 const options = @import("options");
 
 const files = @import("files.zig");
+const fs = @import("fs.zig");
 
 const Args = union(enum) {
     help: void,
@@ -187,7 +188,7 @@ fn lsCmd(
     var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
         fatal("Failed to locate base dir: {t}", .{err});
-    const versions_path = files.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory", .{});
 
     if (opts.all) {
@@ -230,7 +231,7 @@ fn rmCmd(io: Io, env_map: *const std.process.Environ.Map, opts: RmArgs) void {
     var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
         fatal("Failed to locate base dir: {t}", .{err});
-    const versions_path = files.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory", .{});
 
     const versions_dir = Io.Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|

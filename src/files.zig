@@ -9,6 +9,7 @@ const fatal = std.process.fatal;
 
 const builtin = @import("builtin");
 const known_folders = @import("known-folders");
+const fs = @import("fs.zig");
 const http = @import("http.zig");
 const json = @import("json.zig");
 
@@ -166,24 +167,294 @@ pub const InstalledZigIterator = struct {
     }
 };
 
-/// Joins the paths in `paths` with the existing path `buf[0..base_len]`.
-/// Returns a slice into `buf`.
-pub fn joinPathsInPlace(buf: []u8, base_len: usize, paths: []const []const u8) error{OutOfMemory}![]u8 {
-    const isSep = Dir.path.isSep;
-    const first_path = for (paths) |p| {
-        if (p.len > 0) break p;
-    } else return buf[0..base_len];
-    const start = if (base_len == 0)
-        0
-    else
-        base_len + 1 - @intFromBool(isSep(buf[base_len - 1])) - @intFromBool(isSep(first_path[0]));
+pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
+    var fba: std.heap.FixedBufferAllocator = .init(buf);
+    const cache_path = try known_folders.getPath(
+        io,
+        fba.allocator(),
+        environ,
+        .cache,
+    ) orelse return error.CacheDirNotFound;
+    if (!Dir.path.isAbsolute(cache_path)) return error.CacheDirNotFound;
+    return try fs.joinPathsInPlace(buf, cache_path.len, &.{BASE_DIR});
+}
 
-    if (!isSep(buf[base_len - 1]) and !isSep(first_path[0])) {
-        buf[start - 1] = Dir.path.sep;
+/// Opens and returns zxc's base directory.
+pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    const path = getBasePath(io, environ, &buf) catch |err|
+        fatal("Failed to locate base dir: {t}", .{err});
+    return Dir.cwd().createDirPathOpen(io, path, .{}) catch |err|
+        fatal("Failed to open base dir '{s}': {t}", .{ path, err });
+}
+
+/// Opens and returns zxc's tmp directory with `.iterate = true`.
+pub fn openTmpDir(io: Io, base_dir: Dir) !Dir {
+    return try base_dir.createDirPathOpen(io, "tmp", .{ .open_options = .{ .iterate = true } });
+}
+
+const GetPerishableArgs = struct {
+    allocator: Allocator,
+    client: *std.http.Client,
+    base_dir: Dir,
+    base_path: []const u8,
+    /// How long before the file is considered outdated.
+    file_expiry: Io.Duration,
+    /// Where to download the file from.
+    fetch_uri: std.Uri,
+};
+fn getPerishableFile(
+    comptime name: []const u8,
+    comptime Return: type,
+    comptime E: type,
+    comptime getIfValid: fn (Allocator, Io, Io.File, Io.Duration) E!Return,
+    args: GetPerishableArgs,
+) !Return {
+    const io = args.client.io;
+
+    happy: {
+        const file = args.base_dir.openFile(io, args.base_path, .{
+            .allow_directory = false,
+            .mode = .read_only,
+            .lock = .shared,
+            .lock_nonblocking = false,
+        }) catch |err| switch (err) {
+            error.IsDir => {
+                args.base_dir.deleteTree(io, args.base_path) catch {};
+                break :happy;
+            },
+            error.FileNotFound => break :happy,
+            error.NoSpaceLeft,
+            error.PathAlreadyExists,
+            error.WouldBlock,
+            => unreachable,
+            else => |e| return e,
+        };
+        defer file.close(io);
+        if (getIfValid(args.allocator, io, file, args.file_expiry)) |contents| {
+            return contents;
+        } else |_| break :happy;
     }
-    var fba: std.heap.FixedBufferAllocator = .init(buf[start..]);
-    const n = (try Dir.path.join(fba.allocator(), paths)).len;
-    return buf[0 .. start + n];
+
+    const file = args.base_dir.createFile(io, args.base_path, .{
+        .read = true,
+        .truncate = true,
+        .lock = .exclusive,
+        .lock_nonblocking = false,
+    }) catch |err| switch (err) {
+        error.PathAlreadyExists, error.WouldBlock => unreachable,
+        else => |e| return e,
+    };
+    defer file.close(io);
+    // Did someone else fetch a new file while we were waiting?
+    if (getIfValid(args.allocator, io, file, args.file_expiry)) |contents| {
+        return contents;
+    } else |_| {}
+
+    log.info("Fetching {s}...", .{name});
+    var write_buf: [16 * 1024]u8 = undefined;
+    var file_writer = file.writer(io, &write_buf);
+    if (http.fetchToFile(args.client, args.fetch_uri, &file_writer)) |_| {
+        log.info("Fetched {s}.", .{name});
+    } else |err| {
+        log.warn("Failed to fetch {s}: {t}", .{ name, err });
+    }
+
+    // If the fetch failed, return the old file anyway
+    return getIfValid(args.allocator, io, file, .max);
+}
+
+/// Returns the contents of the index file if it is valid.
+fn getIndexIfValid(
+    allocator: Allocator,
+    io: Io,
+    index_file: Io.File,
+    max_age: Io.Duration,
+) ![]const u8 {
+    const stat = try index_file.stat(io);
+    if (stat.size == 0) {
+        return error.NoIndex;
+    }
+    const age = stat.mtime.untilNow(io, .real);
+    if (age.toNanoseconds() > max_age.toNanoseconds()) {
+        return error.Outdated;
+    }
+
+    const content = fs.readAllExact(allocator, io, index_file, stat.size) catch |err| switch (err) {
+        error.WrongSize => return error.IndexFileChanged,
+        else => |e| return e,
+    };
+    errdefer allocator.free(content);
+    var stack_buf: [INDEX_JSON_STACK_SIZE]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&stack_buf);
+    if (!try std.json.validate(fba.allocator(), content)) {
+        return error.BadIndexFile;
+    }
+    return content;
+}
+
+/// Returns the Zig index, downloading from the internet if necessary.
+pub fn getIndex(allocator: Allocator, client: *std.http.Client, base_dir: Dir) ![]const u8 {
+    const INDEX_URI = comptime std.Uri.parse("https://ziglang.org/download/index.json") catch unreachable;
+    const R = @typeInfo(@TypeOf(getIndexIfValid)).@"fn".return_type.?;
+    return getPerishableFile(
+        "index",
+        []const u8,
+        @typeInfo(R).error_union.error_set,
+        getIndexIfValid,
+        .{
+            .allocator = allocator,
+            .client = client,
+            .base_dir = base_dir,
+            .base_path = "index.json",
+            .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
+            .fetch_uri = INDEX_URI,
+        },
+    );
+}
+
+/// Returns a list of mirrors if the mirrors file is valid.
+/// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
+fn getMirrorsIfValid(
+    allocator: Allocator,
+    io: Io,
+    mirrors_file: Io.File,
+    max_age: Io.Duration,
+) ![][]const u8 {
+    const stat = try mirrors_file.stat(io);
+    if (stat.size == 0) {
+        return error.NoMirrors;
+    }
+    const age = stat.mtime.untilNow(io, .real);
+    if (age.toNanoseconds() > max_age.toNanoseconds()) {
+        return error.Outdated;
+    }
+
+    const content = fs.readAllExact(allocator, io, mirrors_file, stat.size) catch |err| switch (err) {
+        error.WrongSize => return error.MirrorsFileChanged,
+        else => |e| return e,
+    };
+    errdefer allocator.free(content);
+
+    const line_count = std.mem.countScalar(u8, content, '\n');
+    if (line_count == 0) {
+        return error.BadMirrorsFile;
+    }
+    var mirrors: std.ArrayList([]const u8) = try .initCapacity(allocator, line_count);
+    errdefer mirrors.deinit(allocator);
+
+    var lines = std.mem.tokenizeScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        mirrors.appendAssumeCapacity(line);
+    }
+    if (mirrors.items.len != line_count) {
+        return error.BadMirrorsFile;
+    }
+    return mirrors.items;
+}
+
+/// Returns the list of mirrors, downloading from the internet if necessary.
+/// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
+pub fn getMirrors(
+    arena: *std.heap.ArenaAllocator,
+    client: *std.http.Client,
+    base_dir: Dir,
+) ![][]const u8 {
+    const MIRRORS_URI = comptime std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch unreachable;
+    const R = @typeInfo(@TypeOf(getMirrorsIfValid)).@"fn".return_type.?;
+    return getPerishableFile(
+        "mirrors",
+        [][]const u8,
+        @typeInfo(R).error_union.error_set,
+        getMirrorsIfValid,
+        .{
+            .allocator = arena.allocator(),
+            .client = client,
+            .base_dir = base_dir,
+            .base_path = "mirrors.txt",
+            .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
+            .fetch_uri = MIRRORS_URI,
+        },
+    );
+}
+
+/// Returns info about the tarball for `zig_version` on `target`, or `null` if it does not exist.
+/// The result contains slices into `index`.
+pub fn getTarballInfo(index: []const u8, zig_version: []const u8, target: []const u8) error{UnexpectedFormat}!?TarballInfo {
+    var stack_buf: [INDEX_JSON_STACK_SIZE]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&stack_buf);
+    // This scanner will never return an error
+    var scanner: std.json.Scanner = .initCompleteInput(fba.allocator(), index);
+
+    json.skipToObjectKey(&scanner, zig_version) catch |err| switch (err) {
+        error.NoMoreKeys => return null,
+        else => return error.UnexpectedFormat,
+    };
+    json.skipToObjectKey(&scanner, target) catch |err| switch (err) {
+        error.NoMoreKeys => return null,
+        else => return error.UnexpectedFormat,
+    };
+
+    var url: ?[]const u8 = null;
+    var size: ?u64 = null;
+    switch (scanner.next() catch unreachable) {
+        .object_begin => {},
+        else => return error.UnexpectedFormat,
+    }
+    while (url == null or size == null) {
+        switch (scanner.next() catch unreachable) {
+            .string => |key| if (std.mem.eql(u8, key, "tarball")) {
+                url = json.parseNext([]const u8, &scanner) catch return error.UnexpectedFormat;
+            } else if (std.mem.eql(u8, key, "size")) {
+                size = json.parseNext(u64, &scanner) catch return error.UnexpectedFormat;
+            } else {
+                scanner.skipValue() catch unreachable;
+            },
+            .object_end => return null,
+            else => unreachable,
+        }
+    }
+
+    return if (std.mem.cutScalarLast(u8, url.?, '/')) |cuts|
+        TarballInfo{
+            .fallback_url = url.?,
+            .name = cuts[1],
+            .size = size.?,
+        }
+    else
+        error.UnexpectedFormat;
+}
+
+/// Extracts `tarball` into `dir`.
+/// The tarball format and extracted directory name is infered from `tarball_name`.
+/// Returns the infered extracted directory name.
+pub fn extractZigTarball(
+    allocator: Allocator,
+    io: Io,
+    dir: Dir,
+    tarball: Io.File,
+    tarball_name: []const u8,
+) ![]const u8 {
+    const buf = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(buf);
+    var reader = tarball.reader(io, buf);
+
+    const tarball_format = ArchiveFormat.fromFileName(tarball_name) orelse
+        return error.UnsupportedTarballFormat;
+    const dir_name = switch (tarball_format) {
+        .xz => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
+        .zip => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
+    };
+    try dir.deleteTree(io, dir_name);
+    switch (tarball_format) {
+        .xz => {
+            var d: std.compress.xz.Decompress = try .init(&reader.interface, allocator, &.{});
+            defer d.deinit();
+            try std.tar.extract(io, dir, &d.reader, .{});
+        },
+        .zip => try std.zip.extract(dir, &reader, .{}),
+    }
+    return dir_name;
 }
 
 /// Returns whether the given Zig version is installed.
@@ -362,307 +633,4 @@ pub fn getAllVersions(
     }
 
     return try versions.toOwnedSlice(allocator);
-}
-
-pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
-    var fba: std.heap.FixedBufferAllocator = .init(buf);
-    const cache_path = try known_folders.getPath(
-        io,
-        fba.allocator(),
-        environ,
-        .cache,
-    ) orelse return error.CacheDirNotFound;
-    if (!Dir.path.isAbsolute(cache_path)) return error.CacheDirNotFound;
-    return try joinPathsInPlace(buf, cache_path.len, &.{BASE_DIR});
-}
-
-/// Opens and returns zxc's base directory.
-pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
-    var buf: [Dir.max_path_bytes]u8 = undefined;
-    const path = getBasePath(io, environ, &buf) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err});
-    return Dir.cwd().createDirPathOpen(io, path, .{}) catch |err|
-        fatal("Failed to open base dir '{s}': {t}", .{ path, err });
-}
-
-/// Opens and returns zxc's tmp directory with `.iterate = true`.
-pub fn openTmpDir(io: Io, base_dir: Dir) !Dir {
-    return try base_dir.createDirPathOpen(io, "tmp", .{ .open_options = .{ .iterate = true } });
-}
-
-/// Extracts `tarball` into `dst_dir` as a directory named `version_name`.
-/// The tarball is first extracted into `tmp_dir` before being renamed to (try to) make the operation atomic.
-pub fn extractZigTarball(
-    allocator: Allocator,
-    io: Io,
-    dst_dir: Dir,
-    tmp_dir: Dir,
-    tarball: Io.File,
-    tarball_name: []const u8,
-    version_name: []const u8,
-) !void {
-    const buf = try allocator.alloc(u8, 64 * 1024);
-    defer allocator.free(buf);
-    var reader = tarball.reader(io, buf);
-
-    const tarball_format = ArchiveFormat.fromFileName(tarball_name) orelse unreachable;
-    const dir_name = switch (tarball_format) {
-        .xz => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
-        .zip => tarball_name[0 .. tarball_name.len - tarball_format.extension().len],
-    };
-    try tmp_dir.deleteTree(io, dir_name);
-    switch (tarball_format) {
-        .xz => {
-            var d: std.compress.xz.Decompress = try .init(&reader.interface, allocator, &.{});
-            defer d.deinit();
-            try std.tar.extract(io, tmp_dir, &d.reader, .{});
-        },
-        .zip => try std.zip.extract(tmp_dir, &reader, .{}),
-    }
-    try dst_dir.deleteTree(io, version_name);
-    try Dir.rename(tmp_dir, dir_name, dst_dir, version_name, io);
-}
-
-fn readAllExact(allocator: Allocator, io: Io, file: Io.File, size: usize) ![]const u8 {
-    var reader: Io.File.Reader = .initSize(file, io, &.{}, size);
-    const content = try allocator.alloc(u8, size);
-    errdefer allocator.free(content);
-    reader.interface.readSliceAll(content) catch |err| switch (err) {
-        error.ReadFailed => return reader.err.?,
-        error.EndOfStream => return error.WrongSize,
-    };
-    if (!reader.atEnd()) return error.WrongSize;
-    return content;
-}
-
-const GetPerishableArgs = struct {
-    allocator: Allocator,
-    client: *std.http.Client,
-    base_dir: Dir,
-    base_path: []const u8,
-    /// How long before the file is considered outdated.
-    file_expiry: Io.Duration,
-    /// Where to download the file from.
-    fetch_uri: std.Uri,
-};
-fn getPerishableFile(
-    comptime name: []const u8,
-    comptime Return: type,
-    comptime E: type,
-    comptime getIfValid: fn (Allocator, Io, Io.File, Io.Duration) E!Return,
-    args: GetPerishableArgs,
-) !Return {
-    const io = args.client.io;
-
-    happy: {
-        const file = args.base_dir.openFile(io, args.base_path, .{
-            .allow_directory = false,
-            .mode = .read_only,
-            .lock = .shared,
-            .lock_nonblocking = false,
-        }) catch |err| switch (err) {
-            error.IsDir => {
-                args.base_dir.deleteTree(io, args.base_path) catch {};
-                break :happy;
-            },
-            error.FileNotFound => break :happy,
-            error.NoSpaceLeft,
-            error.PathAlreadyExists,
-            error.WouldBlock,
-            => unreachable,
-            else => |e| return e,
-        };
-        defer file.close(io);
-        if (getIfValid(args.allocator, io, file, args.file_expiry)) |contents| {
-            return contents;
-        } else |_| break :happy;
-    }
-
-    const file = args.base_dir.createFile(io, args.base_path, .{
-        .read = true,
-        .truncate = true,
-        .lock = .exclusive,
-        .lock_nonblocking = false,
-    }) catch |err| switch (err) {
-        error.PathAlreadyExists, error.WouldBlock => unreachable,
-        else => |e| return e,
-    };
-    defer file.close(io);
-    // Did someone else fetch a new file while we were waiting?
-    if (getIfValid(args.allocator, io, file, args.file_expiry)) |contents| {
-        return contents;
-    } else |_| {}
-
-    log.info("Fetching {s}...", .{name});
-    var write_buf: [16 * 1024]u8 = undefined;
-    var file_writer = file.writer(io, &write_buf);
-    if (http.fetchToFile(args.client, args.fetch_uri, &file_writer)) |_| {
-        log.info("Fetched {s}.", .{name});
-    } else |err| {
-        log.warn("Failed to fetch {s}: {t}", .{ name, err });
-    }
-
-    // If the fetch failed, return the old file anyway
-    return getIfValid(args.allocator, io, file, .max);
-}
-
-/// Returns the contents of the index file if it is valid.
-fn getIndexIfValid(
-    allocator: Allocator,
-    io: Io,
-    index_file: Io.File,
-    max_age: Io.Duration,
-) ![]const u8 {
-    const stat = try index_file.stat(io);
-    if (stat.size == 0) {
-        return error.NoIndex;
-    }
-    const age = stat.mtime.untilNow(io, .real);
-    if (age.toNanoseconds() > max_age.toNanoseconds()) {
-        return error.Outdated;
-    }
-
-    const content = readAllExact(allocator, io, index_file, stat.size) catch |err| switch (err) {
-        error.WrongSize => return error.IndexFileChanged,
-        else => |e| return e,
-    };
-    errdefer allocator.free(content);
-    var stack_buf: [INDEX_JSON_STACK_SIZE]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&stack_buf);
-    if (!try std.json.validate(fba.allocator(), content)) {
-        return error.BadIndexFile;
-    }
-    return content;
-}
-
-/// Returns the Zig index, downloading from the internet if necessary.
-pub fn getIndex(allocator: Allocator, client: *std.http.Client, base_dir: Dir) ![]const u8 {
-    const INDEX_URI = comptime std.Uri.parse("https://ziglang.org/download/index.json") catch unreachable;
-    const R = @typeInfo(@TypeOf(getIndexIfValid)).@"fn".return_type.?;
-    return getPerishableFile(
-        "index",
-        []const u8,
-        @typeInfo(R).error_union.error_set,
-        getIndexIfValid,
-        .{
-            .allocator = allocator,
-            .client = client,
-            .base_dir = base_dir,
-            .base_path = "index.json",
-            .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
-            .fetch_uri = INDEX_URI,
-        },
-    );
-}
-
-/// Returns a list of mirrors if the mirrors file is valid.
-/// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
-fn getMirrorsIfValid(
-    allocator: Allocator,
-    io: Io,
-    mirrors_file: Io.File,
-    max_age: Io.Duration,
-) ![][]const u8 {
-    const stat = try mirrors_file.stat(io);
-    if (stat.size == 0) {
-        return error.NoMirrors;
-    }
-    const age = stat.mtime.untilNow(io, .real);
-    if (age.toNanoseconds() > max_age.toNanoseconds()) {
-        return error.Outdated;
-    }
-
-    const content = readAllExact(allocator, io, mirrors_file, stat.size) catch |err| switch (err) {
-        error.WrongSize => return error.MirrorsFileChanged,
-        else => |e| return e,
-    };
-    errdefer allocator.free(content);
-
-    const line_count = std.mem.countScalar(u8, content, '\n');
-    if (line_count == 0) {
-        return error.BadMirrorsFile;
-    }
-    var mirrors: std.ArrayList([]const u8) = try .initCapacity(allocator, line_count);
-    errdefer mirrors.deinit(allocator);
-
-    var lines = std.mem.tokenizeScalar(u8, content, '\n');
-    while (lines.next()) |line| {
-        mirrors.appendAssumeCapacity(line);
-    }
-    if (mirrors.items.len != line_count) {
-        return error.BadMirrorsFile;
-    }
-    return mirrors.items;
-}
-
-/// Returns the list of mirrors, downloading from the internet if necessary.
-/// The strings in the list come from a single backing allocation, so an arena-style allocator must be used.
-pub fn getMirrors(
-    arena: *std.heap.ArenaAllocator,
-    client: *std.http.Client,
-    base_dir: Dir,
-) ![][]const u8 {
-    const MIRRORS_URI = comptime std.Uri.parse("https://ziglang.org/download/community-mirrors.txt") catch unreachable;
-    const R = @typeInfo(@TypeOf(getMirrorsIfValid)).@"fn".return_type.?;
-    return getPerishableFile(
-        "mirrors",
-        [][]const u8,
-        @typeInfo(R).error_union.error_set,
-        getMirrorsIfValid,
-        .{
-            .allocator = arena.allocator(),
-            .client = client,
-            .base_dir = base_dir,
-            .base_path = "mirrors.txt",
-            .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
-            .fetch_uri = MIRRORS_URI,
-        },
-    );
-}
-
-/// Returns info about the tarball for `zig_version` on `target`, or `null` if it does not exist.
-/// The result contains slices into `index`.
-pub fn getTarballInfo(index: []const u8, zig_version: []const u8, target: []const u8) error{UnexpectedFormat}!?TarballInfo {
-    var stack_buf: [INDEX_JSON_STACK_SIZE]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&stack_buf);
-    // This scanner will never return an error
-    var scanner: std.json.Scanner = .initCompleteInput(fba.allocator(), index);
-
-    json.skipToObjectKey(&scanner, zig_version) catch |err| switch (err) {
-        error.NoMoreKeys => return null,
-        else => return error.UnexpectedFormat,
-    };
-    json.skipToObjectKey(&scanner, target) catch |err| switch (err) {
-        error.NoMoreKeys => return null,
-        else => return error.UnexpectedFormat,
-    };
-
-    var url: ?[]const u8 = null;
-    var size: ?u64 = null;
-    switch (scanner.next() catch unreachable) {
-        .object_begin => {},
-        else => return error.UnexpectedFormat,
-    }
-    while (url == null or size == null) {
-        switch (scanner.next() catch unreachable) {
-            .string => |key| if (std.mem.eql(u8, key, "tarball")) {
-                url = json.parseNext([]const u8, &scanner) catch return error.UnexpectedFormat;
-            } else if (std.mem.eql(u8, key, "size")) {
-                size = json.parseNext(u64, &scanner) catch return error.UnexpectedFormat;
-            } else {
-                scanner.skipValue() catch unreachable;
-            },
-            .object_end => return null,
-            else => unreachable,
-        }
-    }
-
-    return if (std.mem.cutScalarLast(u8, url.?, '/')) |cuts|
-        TarballInfo{
-            .fallback_url = url.?,
-            .name = cuts[1],
-            .size = size.?,
-        }
-    else
-        error.UnexpectedFormat;
 }
