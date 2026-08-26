@@ -156,7 +156,9 @@ pub const InstalledZigIterator = struct {
     }
 
     pub fn next(self: *InstalledZigIterator, io: Io) ?[]const u8 {
-        while (self.dir_iter.next(io) catch |err| fatal("Failed to iterate versions folder: {t}", .{err})) |entry| {
+        while (self.dir_iter.next(io) catch |err|
+            fatal("Failed to iterate versions directory: {t}", .{err})) |entry|
+        {
             if (entry.kind == .directory and
                 isZigVersionInstalledDir(io, self.versionsDir(), entry.name))
             {
@@ -183,9 +185,9 @@ pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
 pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
     var buf: [Dir.max_path_bytes]u8 = undefined;
     const path = getBasePath(io, environ, &buf) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err});
+        fatal("Failed to locate base directory: {t}", .{err});
     return Dir.cwd().createDirPathOpen(io, path, .{}) catch |err|
-        fatal("Failed to open base dir '{s}': {t}", .{ path, err });
+        fatal("Failed to open base directory '{s}': {t}", .{ path, err });
 }
 
 /// Opens and returns zxc's tmp directory with `.iterate = true`.

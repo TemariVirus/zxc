@@ -70,7 +70,7 @@ const InstallArgs = struct {
     pub const help_text =
         \\Usage: zxc install [options] VERSION PATH
         \\
-        \\Install a Zig version from the tarball or folder at PATH.
+        \\Install a Zig version from the tarball or directory at PATH.
         \\VERSION should match the expected .minimum_zig_version field of build.zig.zon
         \\
         \\Supported tarball formats: .tar.xz, .zip
@@ -229,19 +229,19 @@ fn installCmd(
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err});
+        fatal("Failed to locate base directory: {t}", .{err});
     const versions_dir = blk: {
         const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-            fatal("Out of memory", .{});
+            fatal("Out of memory.", .{});
         break :blk Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
-            fatal("Unable to open versions folder: {t}", .{err});
+            fatal("Unable to open versions directory: {t}", .{err});
     };
     defer versions_dir.close(io);
     const tmp_dir = blk: {
         const tmp_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{"tmp"}) catch
-            fatal("Out of memory", .{});
+            fatal("Out of memory.", .{});
         break :blk Dir.createDirPathOpen(.cwd(), io, tmp_path, .{}) catch |err|
-            fatal("Unable to open temporary folder: {t}", .{err});
+            fatal("Unable to open temporary directory: {t}", .{err});
     };
     defer tmp_dir.close(io);
 
@@ -316,9 +316,9 @@ fn lsAll(
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const versions = files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
-        error.OutOfMemory => fatal("Out of memory", .{}),
+        error.OutOfMemory => fatal("Out of memory.", .{}),
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        else => fatal("Unable to open versions folder: {t}", .{err}),
+        else => fatal("Unable to open versions directory: {t}", .{err}),
     };
     std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
     for (versions) |v| {
@@ -342,13 +342,13 @@ fn lsCmd(
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err});
+        fatal("Failed to locate base directory: {t}", .{err});
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory", .{});
+        fatal("Out of memory.", .{});
 
     if (opts.all) {
         const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
-            fatal("Failed to open base dir '{s}': {t}", .{ base_path, err });
+            fatal("Failed to open base directory '{s}': {t}", .{ base_path, err });
         defer base_dir.close(io);
         return lsAll(allocator, io, base_dir, versions_path, &stdout.interface);
     }
@@ -357,9 +357,9 @@ fn lsCmd(
     defer arena.deinit();
     // Pass empty index to only get installed versions
     const versions = files.getAllVersions(arena.allocator(), io, versions_path, "{}") catch |err| switch (err) {
-        error.OutOfMemory => fatal("Out of memory", .{}),
+        error.OutOfMemory => fatal("Out of memory.", .{}),
         error.UnexpectedFormat => unreachable,
-        else => fatal("Unable to open versions folder: {t}", .{err}),
+        else => fatal("Unable to open versions directory: {t}", .{err}),
     };
     std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
 
@@ -385,12 +385,12 @@ fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err});
+        fatal("Failed to locate base directory: {t}", .{err});
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory", .{});
+        fatal("Out of memory.", .{});
 
     const versions_dir = Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
-        fatal("Unable to open versions folder: {t}", .{err});
+        fatal("Unable to open versions directory: {t}", .{err});
     defer versions_dir.close(io);
     version_loop: while (opts.nextVersion()) |version| {
         // Prevent path traversal
@@ -415,7 +415,7 @@ pub fn main(init: std.process.Init) void {
 
     var stdout = File.stdout().writer(io, &.{});
     const argv = init.minimal.args.toSlice(init.arena.allocator()) catch
-        fatal("Out of memory while parsing args", .{});
+        fatal("Out of memory while parsing args.", .{});
     var parser: lexopts.Parser = .init(argv);
 
     const args = Args.parse(&parser) orelse {

@@ -153,9 +153,9 @@ fn selectVersionMenu(
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const versions = files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
-        error.OutOfMemory => fatal("Out of memory", .{}),
+        error.OutOfMemory => fatal("Out of memory.", .{}),
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        else => fatal("Unable to open versions folder: {t}", .{err}),
+        else => fatal("Unable to open versions directory: {t}", .{err}),
     };
     std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
 
@@ -213,7 +213,7 @@ fn selectVersionMenu(
 
     const chosen = allocator.dupe(u8, versions[choice].name) catch {
         cleanupVersionMenu(stdout, kr);
-        fatal("Out of memory", .{});
+        fatal("Out of memory.", .{});
     };
     errdefer allocator.free(chosen);
     return .{ chosen, versions[choice].installed };
@@ -385,13 +385,13 @@ pub fn main(init: std.process.Init.Minimal) void {
     var stdout_buf: [256]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(io, &stdout_buf);
     const argv: [][]const u8 = @ptrCast(@constCast(init.args.toSlice(arena.allocator()) catch
-        fatal("Out of memory while fetching args", .{})));
+        fatal("Out of memory while parsing args.", .{})));
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, &environ_map, &path_buf) catch |err|
-        fatal("Failed to locate base dir: {t}", .{err});
+        fatal("Failed to locate base directory: {t}", .{err});
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory", .{});
+        fatal("Out of memory.", .{});
 
     const base_dir = files.openBaseDir(io, &environ_map);
     defer base_dir.close(io);
@@ -405,7 +405,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         var master_ver_buf: [64]u8 = undefined;
         const version = if (detectZigVersion(gpa, io)) |v| blk: {
             defer gpa.free(v);
-            break :blk arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
+            break :blk arena.allocator().dupe(u8, v) catch fatal("Out of memory.", .{});
         } else blk: {
             index = files.getIndex(arena.allocator(), &client, base_dir) catch |err|
                 fatal("Failed to get index: {t}", .{err});
@@ -423,7 +423,7 @@ pub fn main(init: std.process.Init.Minimal) void {
             }
             const v, const installed = selectVersionMenu(gpa, io, index.?, versions_path, &stdout.interface);
             defer gpa.free(v);
-            const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory", .{});
+            const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory.", .{});
             break :ver .{ version, installed };
         };
 
