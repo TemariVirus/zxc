@@ -100,39 +100,6 @@ fn installZig(
     log.info("Successfully installed zig {s}!", .{version});
 }
 
-/// Returns the zig version from `zon_path`, or null if the path does not exist.
-/// If the file at `zon_path` does not store the zig version, `error.ParseZon` is returned.
-fn getZigVersionFromBuildZigZon(
-    allocator: Allocator,
-    io: Io,
-    zon_path: []const u8,
-) !?[]const u8 {
-    const text = Dir.cwd().readFileAllocOptions(
-        io,
-        zon_path,
-        allocator,
-        .limited(16 * 1024 * 1024),
-        .of(u8),
-        0,
-    ) catch |err| switch (err) {
-        error.FileNotFound, error.IsDir => return null,
-        else => |e| return e,
-    };
-    defer allocator.free(text);
-
-    const zon = try std.zon.parse.fromSliceAlloc(
-        struct { minimum_zig_version: []const u8 },
-        allocator,
-        text,
-        null,
-        .{ .ignore_unknown_fields = true },
-    );
-    errdefer std.zon.parse.free(allocator, zon);
-
-    _ = std.SemanticVersion.parse(zon.minimum_zig_version) catch return error.ParseZon;
-    return zon.minimum_zig_version;
-}
-
 fn cleanupVersionMenu(stdout: *Io.Writer, kr: KeyReader) void {
     term.setCursorVisibility(stdout, true) catch {};
     term.previousLine(stdout, 2) catch {}; // Instruction text takes up 2 lines
@@ -219,82 +186,6 @@ fn selectVersionMenu(
     return .{ chosen, versions[choice].installed };
 }
 
-/// Tries to detect the required zig version based on the current working directory.
-fn detectZigVersion(allocator: Allocator, io: Io) ?[]const u8 {
-    const filename = "build.zig.zon";
-
-    // This will usually succeed, allowing us to skip a syscall to get the current path
-    if (getZigVersionFromBuildZigZon(allocator, io, filename) catch |err| switch (err) {
-        error.ParseZon => {
-            log.warn("Failed to detect Zig version from build.zig.zon.", .{});
-            return null;
-        },
-        else => fatal("Failed to read build.zig.zon: {t}", .{err}),
-    }) |ver| return ver;
-
-    var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    const path = path_buf[0 .. std.process.currentPath(io, &path_buf) catch |err|
-        fatal("Unable to get current working directory: {t}", .{err})];
-    if (path.len + 1 + filename.len > path_buf.len) fatal("Current working directory name was too long.", .{});
-
-    var iter = Dir.path.componentIterator(path);
-    _ = iter.last() orelse unreachable;
-    while (iter.previous()) |dir| {
-        @memcpy(path_buf[dir.path.len + 1 ..][0..filename.len], filename);
-        const zon_path = path_buf[0 .. dir.path.len + 1 + filename.len];
-        if (getZigVersionFromBuildZigZon(allocator, io, zon_path) catch |err| switch (err) {
-            error.ParseZon => {
-                log.warn("Failed to detect Zig version from build.zig.zon.", .{});
-                return null;
-            },
-            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
-        }) |ver| return ver;
-    } else blk: {
-        const dir = iter.root() orelse break :blk;
-        @memcpy(path_buf[dir.len..][0..filename.len], filename);
-        const zon_path = path_buf[0 .. dir.len + filename.len];
-        if (getZigVersionFromBuildZigZon(allocator, io, zon_path) catch |err| switch (err) {
-            error.ParseZon => {
-                log.warn("Failed to detect Zig version from build.zig.zon.", .{});
-                return null;
-            },
-            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
-        }) |ver| return ver;
-    }
-
-    log.info("No build.zig.zon found.", .{});
-    return null;
-}
-
-/// Returns a version in `index` that is compatible with `version`, or `null` if it does not exist.
-/// The returned version is a slice from `index`.
-fn getCompatibleZigVersion(index: []const u8, version: []const u8) ?[]const u8 {
-    const SemVer = std.SemanticVersion;
-    var compatible_version: ?[]const u8 = null;
-    const wanted_semver: ?SemVer = SemVer.parse(version) catch null;
-
-    var index_iter: files.IndexIterator = undefined;
-    index_iter.init(index) catch
-        fatal("Unexpected format for index file. Please update your zxc version.", .{});
-    while (index_iter.next() catch
-        fatal("Unexpected format for index file. Please update your zxc version.", .{})) |entry|
-    {
-        if (std.mem.eql(u8, version, entry.name)) return version;
-        if (entry.version) |v| if (std.mem.eql(u8, version, v)) return version;
-        if (wanted_semver) |wanted| {
-            const online = SemVer.parse(entry.version orelse entry.name) catch continue;
-            if (wanted.major != online.major or wanted.minor != online.minor) continue;
-            // Prefer newer versions
-            if (compatible_version) |prev| {
-                if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
-            }
-            compatible_version = entry.name;
-        }
-    }
-
-    return compatible_version;
-}
-
 fn confirmInstallPrompt(
     wanted_version: []const u8,
     actual_version: []const u8,
@@ -379,6 +270,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     const io = threaded.io();
     const environ_map = init.environ.createMap(arena.allocator()) catch |err|
         fatal("Failed to create env var map: {t}", .{err});
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
 
     var stdin_buf: [64]u8 = undefined;
     var stdin = Io.File.stdin().readerStreaming(io, &stdin_buf);
@@ -392,63 +285,76 @@ pub fn main(init: std.process.Init.Minimal) void {
         fatal("Failed to locate base directory: {t}", .{err});
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory.", .{});
-
     const base_dir = files.openBaseDir(io, &environ_map);
     defer base_dir.close(io);
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    defer client.deinit();
 
     var index: ?[]const u8 = null;
     var tmp_dir: ?Dir = null;
     defer if (tmp_dir) |d| d.close(io);
-    const zig_version, const installed = ver: {
-        var master_ver_buf: [64]u8 = undefined;
-        const version = if (detectZigVersion(gpa, io)) |v| blk: {
-            defer gpa.free(v);
-            break :blk arena.allocator().dupe(u8, v) catch fatal("Out of memory.", .{});
-        } else blk: {
-            index = files.getIndex(arena.allocator(), &client, base_dir) catch |err|
-                fatal("Failed to get index: {t}", .{err});
 
-            // Clean up while waiting for user input
-            tmp_dir = files.openTmpDir(io, base_dir) catch null;
-            var cleanup_task = if (tmp_dir) |d| io.async(LockFile.cleanUpUnlocked, .{ io, d }) else null;
-            defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
-            if (!(term.isatty(stdin.file.handle) catch false)) {
-                break :blk EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
-                    fatal(
-                        "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
-                        .{EnvVars.DEFAULT_ZIG_VERSION},
-                    );
-            }
-            const v, const installed = selectVersionMenu(gpa, io, index.?, versions_path, &stdout.interface);
-            defer gpa.free(v);
-            const version = arena.allocator().dupe(u8, v) catch fatal("Out of memory.", .{});
-            break :ver .{ version, installed };
-        };
-
-        if (files.isZigVersionInstalled(io, versions_path, version)) break :ver .{ version, true };
-        if (files.probeInstalledVersion(io, versions_path, "master", &master_ver_buf)) |mv| blk: {
-            const wanted = std.SemanticVersion.parse(version) catch break :blk;
-            const master = std.SemanticVersion.parse(mv) catch break :blk;
-            if (wanted.major == master.major and wanted.minor == master.minor) {
-                break :ver .{ "master", true };
-            }
+    var installed = false;
+    var confirm_install = false;
+    const wanted_version: []const u8 = ver: {
+        if (files.detectZigVersionFromCwd(gpa, io) catch |err| blk: switch (err) {
+            error.ParseZon => {
+                log.warn("Failed to detect Zig version from build.zig.zon.", .{});
+                break :blk null;
+            },
+            error.FileNotFound => {
+                log.info("No build.zig.zon found.", .{});
+                break :blk null;
+            },
+            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+        }) |v| {
+            break :ver v;
         }
 
-        index = files.getIndex(arena.allocator(), &client, base_dir) catch |err|
-            fatal("Failed to get index: {t}", .{err});
-        const actual_version = getCompatibleZigVersion(index.?, version) orelse
-            fatal("No available Zig version is compatible with {s}", .{version});
-        if (files.isZigVersionInstalled(io, versions_path, actual_version)) break :ver .{ actual_version, true };
+        if (!(term.isatty(stdin.file.handle) catch false)) {
+            const v = EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
+                fatal(
+                    "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
+                    .{EnvVars.DEFAULT_ZIG_VERSION},
+                );
+            break :ver gpa.dupe(u8, v) catch fatal("Out of memory.", .{});
+        }
 
         // Clean up while waiting for user input
-        tmp_dir = files.openTmpDir(io, base_dir) catch null;
+        tmp_dir = tmp_dir orelse files.openTmpDir(io, base_dir) catch null;
         var cleanup_task = if (tmp_dir) |d| io.async(LockFile.cleanUpUnlocked, .{ io, d }) else null;
         defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
-        const confirmed = if (term.isatty(stdin.file.handle) catch false)
+
+        index = index orelse files.getIndex(arena.allocator(), &client, base_dir) catch |err|
+            fatal("Failed to get index: {t}", .{err});
+        const v, installed = selectVersionMenu(gpa, io, index.?, versions_path, &stdout.interface);
+        confirm_install = true;
+        break :ver v;
+    };
+    defer gpa.free(wanted_version);
+
+    const actual_version = if (confirm_install) wanted_version else ver: {
+        const v = files.resolveFromInstalledZigVersion(io, versions_path, wanted_version);
+        installed = v != null;
+        break :ver v;
+    } orelse ver: {
+        index = index orelse files.getIndex(arena.allocator(), &client, base_dir) catch |err|
+            fatal("Failed to get index: {t}", .{err});
+        const v = files.getCompatibleZigVersion(index.?, wanted_version) catch |err| switch (err) {
+            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        } orelse
+            fatal("No available Zig version is compatible with {s}", .{wanted_version});
+        installed = files.isZigVersionInstalled(io, versions_path, v);
+        break :ver v;
+    };
+
+    if (!installed and !confirm_install) {
+        // Clean up while waiting for user input
+        tmp_dir = tmp_dir orelse files.openTmpDir(io, base_dir) catch null;
+        var cleanup_task = if (tmp_dir) |d| io.async(LockFile.cleanUpUnlocked, .{ io, d }) else null;
+        defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
+
+        confirm_install = if (term.isatty(stdin.file.handle) catch false)
             confirmInstallPrompt(
-                version,
+                wanted_version,
                 actual_version,
                 &stdin.interface,
                 &stdout.interface,
@@ -461,40 +367,37 @@ pub fn main(init: std.process.Init.Minimal) void {
                 \\Zig version {s} is not installed.
                 \\Non-interactive mode requires the environment variable {s} to be non-empty to automatically install new versions.
             ,
-                .{ version, EnvVars.ALWAYS_INSTALL },
+                .{ actual_version, EnvVars.ALWAYS_INSTALL },
             )
         else
             true;
 
-        if (!confirmed) {
+        if (!confirm_install) {
             stdout.interface.writeAll("Not installing Zig.\n") catch {};
             stdout.interface.flush() catch {};
             return std.process.cleanExit(io);
         }
+    }
 
-        break :ver .{ actual_version, false };
-    };
     if (!installed) {
-        if (!LockFile.isValidKey(zig_version)) {
+        if (!LockFile.isValidKey(actual_version)) {
             fatal("Zig version cannot start with 'lock.'", .{});
         }
-        if (tmp_dir == null) {
-            tmp_dir = files.openTmpDir(io, base_dir) catch |err|
-                fatal("Failed to create temporary directory: {t}", .{err});
-        }
+        tmp_dir = tmp_dir orelse files.openTmpDir(io, base_dir) catch |err|
+            fatal("Failed to create temporary directory: {t}", .{err});
+        index = index orelse files.getIndex(arena.allocator(), &client, base_dir) catch |err|
+            fatal("Failed to get index: {t}", .{err});
         const mirrors = files.getMirrors(&arena, &client, base_dir) catch |err| switch (err) {
             error.NoMirrors => @constCast(&.{}),
             else => fatal("Failed to get mirrors list: {t}", .{err}),
         };
-        // If the requested zig version was not installed, we must have searched
-        // the index for a version to install, so the index cannot be null.
         installZig(
             &client,
             tmp_dir.?,
             versions_path,
             mirrors,
             index.?,
-            zig_version,
+            actual_version,
             &stdout.interface,
         );
         LockFile.cleanUpUnlocked(io, tmp_dir.?);
@@ -503,9 +406,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     argv[0] = fs.joinPathsInPlace(
         &path_buf,
         versions_path.len,
-        &.{ zig_version, files.ZIG_NAME },
-    ) catch |err|
-        fatal("Failed to make path to Zig executable: {t}", .{err});
+        &.{ actual_version, files.ZIG_NAME },
+    ) catch |err| fatal("Failed to make path to Zig executable: {t}", .{err});
     spawnZig(io, argv, &environ_map) catch |err| fatal("Failed to run Zig: {t}", .{err});
     return std.process.cleanExit(io);
 }

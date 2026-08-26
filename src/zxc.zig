@@ -19,6 +19,7 @@ const Args = union(enum) {
     help: void,
     install: InstallArgs,
     ls: LsArgs,
+    realpath: RealpathArgs,
     rm: RmArgs,
     version: void,
 
@@ -29,10 +30,11 @@ const Args = union(enum) {
         \\Run `zxc COMMAND --help` for command-specific help.
         \\
         \\Commands:
-        \\  i, install  Install a Zig version.
-        \\  ls          List Zig versions.
-        \\  rm          Delete an installed Zig version.
-        \\  version     Prints the program's version.
+        \\  i, install    Install a Zig version.
+        \\  ls            List Zig versions.
+        \\  rp, realpath  Print the path to the current Zig executable.
+        \\  rm            Delete an installed Zig version.
+        \\  version       Prints the program's version.
         \\
         \\Options:
         \\  -h, --help  Print this help message.
@@ -51,6 +53,7 @@ const Args = union(enum) {
                     if (std.mem.eql(u8, cmd, "i") or std.mem.eql(u8, cmd, "install")) return .{ .install = .parse(p) };
                     if (std.mem.eql(u8, cmd, "ls")) return .{ .ls = .parse(p) };
                     if (std.mem.eql(u8, cmd, "rm")) return .{ .rm = .parse(p) };
+                    if (std.mem.eql(u8, cmd, "rp") or std.mem.eql(u8, cmd, "realpath")) return .{ .realpath = .parse(p) };
                     if (std.mem.eql(u8, cmd, "version")) return .version;
                     fatal("Unknown command '{s}'. Run `zxc --help` for a list of commands.", .{cmd});
                 },
@@ -157,6 +160,15 @@ const LsArgs = struct {
     }
 };
 
+const RealpathArgs = struct {
+    pub fn parse(p: *lexopts.Parser) RealpathArgs {
+        while (p.next() catch |err| parserErr(p, err)) |_| {
+            fatal("`zxc realpath` does not accept arguments. Run `zxc --help` for help.", .{});
+        }
+        return .{};
+    }
+};
+
 const RmArgs = struct {
     help: bool = false,
     parser: *lexopts.Parser = undefined,
@@ -221,7 +233,7 @@ fn installCmd(
     opts: InstallArgs,
 ) void {
     var stdout_buf: [1024]u8 = undefined;
-    var stdout = File.stdout().writer(io, &stdout_buf);
+    var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
         stdout.interface.writeAll(InstallArgs.help_text) catch {};
         return stdout.flush() catch {};
@@ -334,7 +346,7 @@ fn lsCmd(
     opts: LsArgs,
 ) void {
     var stdout_buf: [1024]u8 = undefined;
-    var stdout = File.stdout().writer(io, &stdout_buf);
+    var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
         stdout.interface.writeAll(LsArgs.help_text) catch {};
         return stdout.flush() catch {};
@@ -375,9 +387,65 @@ fn lsCmd(
     stdout.flush() catch {};
 }
 
+fn realpathCmd(
+    allocator: std.mem.Allocator,
+    io: Io,
+    env_map: *const EnvMap,
+) void {
+    const wanted_version: []const u8 = ver: {
+        break :ver files.detectZigVersionFromCwd(allocator, io) catch |err| switch (err) {
+            error.ParseZon => fatal("Failed to detect Zig version from build.zig.zon.", .{}),
+            error.FileNotFound => fatal("No build.zig.zon found.", .{}),
+            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+        };
+
+        // TODO: how to handle this?
+        // if (!(term.isatty(stdin.file.handle) catch false)) {
+        //     const v = EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
+        //         fatal(
+        //             "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
+        //             .{EnvVars.DEFAULT_ZIG_VERSION},
+        //         );
+        //     break :ver gpa.dupe(u8, v) catch fatal("Out of memory.", .{});
+        // }
+    };
+    defer allocator.free(wanted_version);
+
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
+        fatal("Failed to locate base directory: {t}", .{err});
+    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+        fatal("Out of memory.", .{});
+
+    const actual_version =
+        files.resolveFromInstalledZigVersion(io, versions_path, wanted_version) orelse
+        ver: {
+            const base_dir = Dir.openDirAbsolute(io, base_path, .{}) catch |err|
+                fatal("Failed to open base directory: {t}", .{err});
+            defer base_dir.close(io);
+            var client: std.http.Client = .{ .allocator = allocator, .io = io };
+            defer client.deinit();
+            const index = files.getIndex(allocator, &client, base_dir) catch |err|
+                fatal("Failed to get index: {t}", .{err});
+            defer allocator.free(index);
+
+            break :ver files.getCompatibleZigVersion(index, wanted_version) catch |err| switch (err) {
+                error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+            } orelse
+                fatal("No available Zig version is compatible with {s}", .{wanted_version});
+        };
+
+    const zig_path = fs.joinPathsInPlace(&path_buf, versions_path.len, &.{ actual_version, files.ZIG_NAME }) catch
+        fatal("Out of memory.", .{});
+    var stdout = File.stdout().writerStreaming(io, &path_buf);
+    stdout.interface.end = zig_path.len;
+    stdout.interface.writeAll("\n") catch {};
+    stdout.interface.flush() catch {};
+}
+
 fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
     var stdout_buf: [1024]u8 = undefined;
-    var stdout = File.stdout().writer(io, &stdout_buf);
+    var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
         stdout.interface.writeAll(RmArgs.help_text) catch {};
         return stdout.flush() catch {};
@@ -408,12 +476,11 @@ fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
     }
 }
 
-// TODO: add command to get path to current zig executable
 pub fn main(init: std.process.Init) void {
     const gpa = init.gpa;
     const io = init.io;
 
-    var stdout = File.stdout().writer(io, &.{});
+    var stdout = File.stdout().writerStreaming(io, &.{});
     const argv = init.minimal.args.toSlice(init.arena.allocator()) catch
         fatal("Out of memory while parsing args.", .{});
     var parser: lexopts.Parser = .init(argv);
@@ -429,7 +496,7 @@ pub fn main(init: std.process.Init) void {
     };
 
     var cleanup_task = task: switch (args) {
-        .help, .version => null, // Operation too short
+        .help, .realpath, .version => null, // Operation too short
         else => {
             var path_buf: [Dir.max_path_bytes]u8 = undefined;
             const base_path = files.getBasePath(io, init.environ_map, &path_buf) catch break :task null;
@@ -444,6 +511,7 @@ pub fn main(init: std.process.Init) void {
         .help => stdout.interface.writeAll(Args.help_text) catch {},
         .install => |opts| installCmd(gpa, io, init.environ_map, opts),
         .ls => |opts| lsCmd(gpa, io, init.environ_map, opts),
+        .realpath => realpathCmd(gpa, io, init.environ_map),
         .rm => |opts| rmCmd(io, init.environ_map, opts),
         .version => stdout.interface.writeAll(options.version ++ "\n") catch {},
     }

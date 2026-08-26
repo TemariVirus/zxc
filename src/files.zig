@@ -645,3 +645,108 @@ pub fn getAllVersions(
 
     return try versions.toOwnedSlice(allocator);
 }
+
+/// Returns a version in `index` that is compatible with `version`, or `null` if it does not exist.
+/// The returned version is a slice from `index`.
+pub fn getCompatibleZigVersion(index: []const u8, version: []const u8) !?[]const u8 {
+    const SemVer = std.SemanticVersion;
+    var compatible_version: ?[]const u8 = null;
+    const wanted_semver: ?SemVer = SemVer.parse(version) catch null;
+
+    var index_iter: IndexIterator = undefined;
+    try index_iter.init(index);
+    while (try index_iter.next()) |entry| {
+        if (std.mem.eql(u8, version, entry.name)) return version;
+        if (entry.version) |v| if (std.mem.eql(u8, version, v)) return version;
+        if (wanted_semver) |wanted| {
+            const online = SemVer.parse(entry.version orelse entry.name) catch continue;
+            if (wanted.major != online.major or wanted.minor != online.minor) continue;
+            // Prefer newer versions
+            if (compatible_version) |prev| {
+                if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
+            }
+            compatible_version = entry.name;
+        }
+    }
+
+    return compatible_version;
+}
+
+/// Returns the zig version from `zon_path`, or null if the file does not exist.
+/// If the file at `zon_path` does not store the zig version, `error.ParseZon` is returned.
+pub fn getZigVersionFromBuildZigZon(
+    allocator: Allocator,
+    io: Io,
+    dir: Dir,
+    zon_path: []const u8,
+) !?[]const u8 {
+    const text = dir.readFileAllocOptions(
+        io,
+        zon_path,
+        allocator,
+        .limited(16 * 1024 * 1024),
+        .of(u8),
+        0,
+    ) catch |err| switch (err) {
+        error.FileNotFound, error.IsDir => return null,
+        else => |e| return e,
+    };
+    defer allocator.free(text);
+
+    const zon = try std.zon.parse.fromSliceAlloc(
+        struct { minimum_zig_version: []const u8 },
+        allocator,
+        text,
+        null,
+        .{ .ignore_unknown_fields = true },
+    );
+    errdefer std.zon.parse.free(allocator, zon);
+
+    _ = std.SemanticVersion.parse(zon.minimum_zig_version) catch return error.ParseZon;
+    return zon.minimum_zig_version;
+}
+
+/// Tries to detect the required zig version based on the current working directory.
+/// If `build.zig.zon` is found but does not contain the zig version, returns `error.ParseZon`.
+/// If `build.zig.zon` is not found, returns `error.FileNotFound`.
+pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io) ![]const u8 {
+    const zon_filename = "build.zig.zon";
+
+    // This will usually succeed, allowing us to skip a syscall to get the current path
+    if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_filename)) |ver| return ver;
+
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    var path: []const u8 = path: {
+        const n = try std.process.currentPath(io, &path_buf);
+        if (n > path_buf.len) return error.NameTooLong;
+        break :path path_buf[0..n];
+    };
+    while (Dir.path.dirname(path)) |parent| {
+        path = parent;
+        const zon_path = fs.joinPathsInPlace(&path_buf, parent.len, &.{zon_filename}) catch
+            return error.NameTooLong;
+        if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_path)) |ver| return ver;
+    }
+    return error.FileNotFound;
+}
+
+/// Resolves `wanted_version` to a compatible insalled Zig version.
+/// Returns `null` if no such version exists.
+pub fn resolveFromInstalledZigVersion(
+    io: Io,
+    versions_path: []const u8,
+    wanted_version: []const u8,
+) ?[]const u8 {
+    var master_ver_buf: [64]u8 = undefined;
+    if (isZigVersionInstalled(io, versions_path, wanted_version)) {
+        return wanted_version;
+    }
+    if (probeInstalledVersion(io, versions_path, "master", &master_ver_buf)) |mv| blk: {
+        const wanted = std.SemanticVersion.parse(wanted_version) catch break :blk;
+        const master = std.SemanticVersion.parse(mv) catch break :blk;
+        if (wanted.major == master.major and wanted.minor == master.minor) {
+            return "master";
+        }
+    }
+    return null;
+}
