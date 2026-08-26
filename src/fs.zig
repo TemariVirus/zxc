@@ -67,6 +67,7 @@ pub fn copyTree(
 /// Returns `error.WrongSize` if the size of `file` was not `size.
 pub fn readAllExact(allocator: Allocator, io: Io, file: File, size: usize) ![]const u8 {
     var reader: File.Reader = .initSize(file, io, &.{}, size);
+    try reader.seekTo(0);
     const content = try allocator.alloc(u8, size);
     errdefer allocator.free(content);
     reader.interface.readSliceAll(content) catch |err| switch (err) {

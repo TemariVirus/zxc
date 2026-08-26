@@ -82,6 +82,7 @@ pub fn fetch(client: *Client, uri: std.Uri) !*FetchResult {
 }
 
 pub fn fetchToFile(client: *Client, uri: std.Uri, writer: *std.Io.File.Writer) !void {
+    try writer.seekTo(0);
     const result = try fetch(client, uri);
     defer result.deinit();
     _ = result.reader.streamRemaining(&writer.interface) catch |err| switch (err) {

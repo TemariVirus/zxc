@@ -240,7 +240,7 @@ fn getPerishableFile(
 
     const file = args.base_dir.createFile(io, args.base_path, .{
         .read = true,
-        .truncate = true,
+        .truncate = false,
         .lock = .exclusive,
         .lock_nonblocking = false,
     }) catch |err| switch (err) {
@@ -260,6 +260,7 @@ fn getPerishableFile(
         log.info("Fetched {s}.", .{name});
     } else |err| {
         log.warn("Failed to fetch {s}: {t}", .{ name, err });
+        log.info("Falling back to old {s}.", .{name});
     }
 
     // If the fetch failed, return the old file anyway
