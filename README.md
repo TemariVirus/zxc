@@ -29,8 +29,28 @@ it also supports environment variables for answering these prompts in non-intera
 - `ZXC_DEFAULT_ZIG_VERSION` - The Zig version to use when it cannot be automatically detected.
 - `ZXC_ALWAYS_INSTALL` - If non-empty, new Zig versions are always installed.
 
-`zxc` is a CLI tool for managing installed Zig versions. This includes: adding, listing, and removing Zig versions.
+`zxc` is a CLI tool for managing installed Zig versions. This includes: installing, listing, and removing Zig versions.
 More detailed help can be viewed by running `zxc --help`.
+
+### Installing custom Zig versions
+
+Custom Zig versions can be installed via a tarball or a directory.
+In both cases, the directory structure must match that used by the official tarballs from [ziglang.org/download](ziglang.org/download)
+
+```sh
+zxc install 1.2.3-custom path/to/zig-tarball.tar.xz  # tarball will be extracted and installed
+zxc install 1.2.3-custom path/to/zig-dir             # directory will be copied
+```
+
+To use the custom Zig versions, the `.minimum_zig_version` field of your `build.zig.zon` must be the same as the version argument used when installing.
+
+```zig
+.{
+    // snip...
+    .minimum_zig_version = "1.2.3-custom",
+    // snip...
+}
+```
 
 ## Why make yet another Zig version manager?
 
