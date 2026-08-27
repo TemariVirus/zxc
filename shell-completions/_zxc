@@ -1,0 +1,48 @@
+#compdef zxc
+
+_zxc() {
+    local state
+    local -a commands
+    commands=(
+        'install:Install a Zig version'
+        'ls:List Zig versions'
+        'realpath:Print the current Zig executable'
+        'rm:Delete an installed Zig version'
+        "version:Prints the program's version"
+        '--help:Print the help message'
+    )
+
+    _arguments \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe 'zxc command' commands
+            ;;
+        args)
+            case $words[1] in
+                i|install)
+                    _arguments \
+                        '--force[Overwrite the already installed version, if it exists]' \
+                        '--help[Print the help message]' \
+                        '1:version:' \
+                        '2:path:_files -g "*.tar.xz|*.zip|*(-/)"'
+                    ;;
+                ls)
+                    _arguments \
+                        '--all[Also list versions available for download online]' \
+                        '--help[Print the help message]' \
+                        '--name-only[Only print version name]'
+                    ;;
+                rm)
+                    _arguments \
+                        '--help[Print the help message]' \
+                        '*:version:($(zxc ls --name-only))'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+compdef _zxc zxc

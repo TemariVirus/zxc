@@ -30,14 +30,14 @@ const Args = union(enum) {
         \\Run `zxc COMMAND --help` for command-specific help.
         \\
         \\Commands:
-        \\  i, install    Install a Zig version.
-        \\  ls            List Zig versions.
-        \\  rp, realpath  Print the path to the current Zig executable.
-        \\  rm            Delete an installed Zig version.
-        \\  version       Prints the program's version.
+        \\  i, install    Install a Zig version
+        \\  ls            List Zig versions
+        \\  rp, realpath  Print the current Zig executable
+        \\  rm            Delete an installed Zig version
+        \\  version       Prints the program's version
         \\
         \\Options:
-        \\  -h, --help  Print this help message.
+        \\  -h, --help    Print this help message
         \\
     ;
 
@@ -79,8 +79,8 @@ const InstallArgs = struct {
         \\Supported tarball formats: .tar.xz, .zip
         \\
         \\Options:
-        \\  -f, --force  Overwrite the already installed version, if it exists.
-        \\  -h, --help   Print this help message.
+        \\  -f, --force  Overwrite the already installed version, if it exists
+        \\  -h, --help   Print this help message
         \\
     ;
 
@@ -128,6 +128,7 @@ const InstallArgs = struct {
 const LsArgs = struct {
     all: bool = false,
     help: bool = false,
+    name_only: bool = false,
 
     pub const help_text =
         \\Usage: zxc ls [options]
@@ -135,8 +136,9 @@ const LsArgs = struct {
         \\List installed Zig versions.
         \\
         \\Options:
-        \\  -a, --all   Also list versions available for download online.
-        \\  -h, --help  Print this help message.
+        \\  -a, --all        Also list versions available for download online
+        \\  -h, --help       Print this help message
+        \\  -n, --name-only  Only print version name
         \\
     ;
 
@@ -149,6 +151,8 @@ const LsArgs = struct {
                         args.all = true;
                     } else if (opt.match("-h") or opt.match("--help")) {
                         return .{ .help = true };
+                    } else if (opt.match("-n") or opt.match("--name-only")) {
+                        args.name_only = true;
                     } else {
                         p.unknownOpt();
                     }
@@ -179,7 +183,7 @@ const RmArgs = struct {
         \\Delete previously installed Zig versions.
         \\
         \\Options:
-        \\  -h, --help  Print this help message.
+        \\  -h, --help  Print this help message
         \\
     ;
 
@@ -310,35 +314,6 @@ fn installCmd(
     stdout.flush() catch {};
 }
 
-fn lsAll(
-    allocator: std.mem.Allocator,
-    io: Io,
-    base_dir: Dir,
-    versions_path: []const u8,
-    stdout: *Io.Writer,
-) void {
-    const index = blk: {
-        var client: std.http.Client = .{ .allocator = allocator, .io = io };
-        defer client.deinit();
-        break :blk files.getIndex(allocator, &client, base_dir) catch |err|
-            fatal("Failed to get index: {t}", .{err});
-    };
-    defer allocator.free(index);
-
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    defer arena.deinit();
-    const versions = files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
-        error.OutOfMemory => fatal("Out of memory.", .{}),
-        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        else => fatal("Unable to open versions directory: {t}", .{err}),
-    };
-    std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
-    for (versions) |v| {
-        stdout.print("{f}\n", .{v}) catch {};
-    }
-    stdout.flush() catch {};
-}
-
 fn lsCmd(
     allocator: std.mem.Allocator,
     io: Io,
@@ -358,31 +333,43 @@ fn lsCmd(
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory.", .{});
 
-    if (opts.all) {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const versions = if (opts.all) blk: {
         const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
             fatal("Failed to open base directory '{s}': {t}", .{ base_path, err });
         defer base_dir.close(io);
-        return lsAll(allocator, io, base_dir, versions_path, &stdout.interface);
-    }
+        var client: std.http.Client = .{ .allocator = allocator, .io = io };
+        defer client.deinit();
+        const index = files.getIndex(allocator, &client, base_dir) catch |err|
+            fatal("Failed to get index: {t}", .{err});
+        defer allocator.free(index);
+        break :blk files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
+            error.OutOfMemory => fatal("Out of memory.", .{}),
+            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+            else => fatal("Unable to open versions directory: {t}", .{err}),
+        };
+    } else
+        // Pass empty index to only get installed versions
+        files.getAllVersions(arena.allocator(), io, versions_path, "{}") catch |err| switch (err) {
+            error.OutOfMemory => fatal("Out of memory.", .{}),
+            error.UnexpectedFormat => unreachable,
+            else => fatal("Unable to open versions directory: {t}", .{err}),
+        };
 
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    defer arena.deinit();
-    // Pass empty index to only get installed versions
-    const versions = files.getAllVersions(arena.allocator(), io, versions_path, "{}") catch |err| switch (err) {
-        error.OutOfMemory => fatal("Out of memory.", .{}),
-        error.UnexpectedFormat => unreachable,
-        else => fatal("Unable to open versions directory: {t}", .{err}),
-    };
     std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
 
-    if (versions.len == 0) {
+    if (versions.len == 0 and !opts.all) {
         stdout.interface.writeAll("No Zig versions installed.\n") catch {};
     } else for (versions) |v| {
-        if (v.version) |ver| {
-            stdout.interface.print("{s} ({s})\n", .{ v.name, ver }) catch {};
-        } else {
-            stdout.interface.print("{s}\n", .{v.name}) catch {};
+        stdout.interface.print("{s}", .{v.name}) catch {};
+        if (!opts.name_only) if (v.version) |ver| {
+            stdout.interface.print(" ({s})", .{ver}) catch {};
+        };
+        if (!opts.name_only and opts.all and v.installed) {
+            stdout.interface.writeAll(" [Installed]") catch {};
         }
+        stdout.interface.writeAll("\n") catch {};
     }
     stdout.flush() catch {};
 }
@@ -483,14 +470,14 @@ pub fn main(init: std.process.Init) void {
     };
 
     var cleanup_task = task: switch (args) {
-        .help, .realpath, .version => null, // Operation too short
-        else => {
+        .install, .rm => {
             var path_buf: [Dir.max_path_bytes]u8 = undefined;
             const base_path = files.getBasePath(io, init.environ_map, &path_buf) catch break :task null;
             const tmp_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{"tmp"}) catch break :task null;
             const tmp_dir = Dir.openDirAbsolute(io, tmp_path, .{ .iterate = true }) catch break :task null;
             break :task io.concurrent(LockFile.cleanUpUnlocked, .{ io, tmp_dir }) catch null;
         },
+        else => null, // Operation too short
     };
     defer if (cleanup_task) |*t| t.cancel(io);
 

@@ -634,9 +634,9 @@ pub fn getAllVersions(
             if (std.mem.eql(u8, old_ver, new_ver)) continue;
         }
         try versions.append(allocator, .{
-            .name = entry.name,
+            .name = try allocator.dupe(u8, entry.name),
             .version = if (entry.version != null and !is_semver)
-                entry.version.?
+                try allocator.dupe(u8, entry.version.?)
             else
                 null,
             .installed = false,
