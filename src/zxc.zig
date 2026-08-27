@@ -441,6 +441,10 @@ fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
             continue :version_loop;
         };
 
+        versions_dir.access(io, version, .{}) catch {
+            log.info("{s} is not installed", .{version});
+            continue;
+        };
         versions_dir.deleteTree(io, version) catch |err| {
             log.err("Failed to remove {s}: {t}", .{ version, err });
             continue;
