@@ -186,6 +186,35 @@ fn selectVersionMenu(
     return .{ chosen, versions[choice].installed };
 }
 
+pub fn getWantedVersion(
+    allocator: Allocator,
+    io: Io,
+    environ: *const std.process.Environ.Map,
+) ?[]const u8 {
+    if (files.detectZigVersionFromCwd(allocator, io) catch |err| blk: switch (err) {
+        error.ParseZon => {
+            log.warn("Failed to detect Zig version from build.zig.zon.", .{});
+            break :blk null;
+        },
+        error.FileNotFound => {
+            log.info("No build.zig.zon found.", .{});
+            break :blk null;
+        },
+        else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+    }) |v| return v;
+
+    if (!(term.isatty(Io.File.stdin().handle) catch false)) {
+        const v = EnvVars.getNonEmpty(environ, EnvVars.DEFAULT_ZIG_VERSION) orelse
+            fatal(
+                "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
+                .{EnvVars.DEFAULT_ZIG_VERSION},
+            );
+        return allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
+    }
+
+    return null;
+}
+
 fn confirmInstallPrompt(
     wanted_version: []const u8,
     actual_version: []const u8,
@@ -294,29 +323,8 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     var installed = false;
     var confirm_install = false;
-    const wanted_version: []const u8 = ver: {
-        if (files.detectZigVersionFromCwd(gpa, io) catch |err| blk: switch (err) {
-            error.ParseZon => {
-                log.warn("Failed to detect Zig version from build.zig.zon.", .{});
-                break :blk null;
-            },
-            error.FileNotFound => {
-                log.info("No build.zig.zon found.", .{});
-                break :blk null;
-            },
-            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
-        }) |v| {
-            break :ver v;
-        }
-
-        if (!(term.isatty(stdin.file.handle) catch false)) {
-            const v = EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
-                fatal(
-                    "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
-                    .{EnvVars.DEFAULT_ZIG_VERSION},
-                );
-            break :ver gpa.dupe(u8, v) catch fatal("Out of memory.", .{});
-        }
+    const wanted_version = ver: {
+        if (getWantedVersion(gpa, io, &environ_map)) |v| break :ver v;
 
         // Clean up while waiting for user input
         tmp_dir = tmp_dir orelse files.openTmpDir(io, base_dir) catch null;
@@ -331,11 +339,12 @@ pub fn main(init: std.process.Init.Minimal) void {
     };
     defer gpa.free(wanted_version);
 
-    const actual_version = if (confirm_install) wanted_version else ver: {
-        const v = files.resolveFromInstalledZigVersion(io, versions_path, wanted_version);
-        installed = v != null;
+    const actual_version = if (confirm_install)
+        wanted_version
+    else if (files.resolveFromInstalledZigVersion(io, versions_path, wanted_version)) |v| ver: {
+        installed = true;
         break :ver v;
-    } orelse ver: {
+    } else ver: {
         index = index orelse files.getIndex(arena.allocator(), &client, base_dir) catch |err|
             fatal("Failed to get index: {t}", .{err});
         const v = files.getCompatibleZigVersion(index.?, wanted_version) catch |err| switch (err) {

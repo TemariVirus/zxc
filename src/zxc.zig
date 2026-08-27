@@ -392,23 +392,10 @@ fn realpathCmd(
     io: Io,
     env_map: *const EnvMap,
 ) void {
-    const wanted_version: []const u8 = ver: {
-        break :ver files.detectZigVersionFromCwd(allocator, io) catch |err| switch (err) {
-            error.ParseZon => fatal("Failed to detect Zig version from build.zig.zon.", .{}),
-            error.FileNotFound => fatal("No build.zig.zon found.", .{}),
-            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
-        };
+    const zig_cli = @import("zig.zig");
 
-        // TODO: how to handle this?
-        // if (!(term.isatty(stdin.file.handle) catch false)) {
-        //     const v = EnvVars.getNonEmpty(&environ_map, EnvVars.DEFAULT_ZIG_VERSION) orelse
-        //         fatal(
-        //             "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
-        //             .{EnvVars.DEFAULT_ZIG_VERSION},
-        //         );
-        //     break :ver gpa.dupe(u8, v) catch fatal("Out of memory.", .{});
-        // }
-    };
+    const wanted_version = zig_cli.getWantedVersion(allocator, io, env_map) orelse
+        std.process.exit(1);
     defer allocator.free(wanted_version);
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
