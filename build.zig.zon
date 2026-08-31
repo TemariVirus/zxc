@@ -9,8 +9,8 @@
             .hash = "known_folders-0.0.0-Fy-PJiDLAAB98m3uYUzatrTb2mO2fpvwx2zpSroEtfbO",
         },
         .lexopts = .{
-            .url = "git+https://codeberg.org/lukeflo/lexopts.git#642ce08ec4f123dc10042fc4d74ff5509b66f7ae",
-            .hash = "lexopts-0.6.0-Zs2TZgNXAAA-KhaectXNnnjzMPLUEB2GqP5dMC04IO0_",
+            .url = "https://codeberg.org/lukeflo/lexopts/archive/zig_0.17_master.tar.gz",
+            .hash = "lexopts-0.7.0-Zs2TZvBTAADIltZtXXzBAn8Jz-8hm3HMRVvXf2PRycxg",
         },
         .minizign = .{
             .url = "git+https://github.com/jedisct1/zig-minisign.git#687934fcda635b5b3f7126393f504798c097171c",

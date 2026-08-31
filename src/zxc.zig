@@ -45,8 +45,8 @@ const Args = union(enum) {
         if (p.next() catch |err| parserErr(p, err)) |arg| {
             switch (arg) {
                 .option => |opt| {
-                    if (opt.match("-h") or opt.match("--help")) return .help;
-                    if (opt.match("-v") or opt.match("--version")) return .version;
+                    if (opt.match(.{ .short = 'h', .long = "help" })) return .help;
+                    if (opt.match(.{ .short = 'v', .long = "version" })) return .version;
                     p.unknownOpt();
                 },
                 .pos_arg => |cmd| {
@@ -89,9 +89,9 @@ const InstallArgs = struct {
         while (p.next() catch |err| parserErr(p, err)) |arg| {
             switch (arg) {
                 .option => |opt| {
-                    if (opt.match("-f") or opt.match("--force")) {
+                    if (opt.match(.{ .short = 'f', .long = "force" })) {
                         args.force = true;
-                    } else if (opt.match("-h") or opt.match("--help")) {
+                    } else if (opt.match(.{ .short = 'h', .long = "help" })) {
                         return .{ .help = true };
                     } else {
                         p.unknownOpt();
@@ -147,11 +147,11 @@ const LsArgs = struct {
         while (p.next() catch |err| parserErr(p, err)) |arg| {
             switch (arg) {
                 .option => |opt| {
-                    if (opt.match("-a") or opt.match("--all")) {
+                    if (opt.match(.{ .short = 'a', .long = "all" })) {
                         args.all = true;
-                    } else if (opt.match("-h") or opt.match("--help")) {
+                    } else if (opt.match(.{ .short = 'h', .long = "help" })) {
                         return .{ .help = true };
-                    } else if (opt.match("-n") or opt.match("--name-only")) {
+                    } else if (opt.match(.{ .short = 'n', .long = "name-only" })) {
                         args.name_only = true;
                     } else {
                         p.unknownOpt();
@@ -195,7 +195,7 @@ const RmArgs = struct {
         var has_version = false;
         while (p.next() catch |err| parserErr(p, err)) |arg| switch (arg) {
             .option => |opt| {
-                if (opt.match("-h") or opt.match("--help")) {
+                if (opt.match(.{ .short = 'h', .long = "help" })) {
                     return .{ .help = true };
                 } else {
                     p.unknownOpt();
