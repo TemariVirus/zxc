@@ -14,7 +14,7 @@ Features:
 
 ## Installation
 
-Download the `zig` and `zxc` binaries from the releases page. That's it.
+Download the `zig` and `zxc` binaries from the releases page (TODO: release 1.0). That's it.
 
 For convenience, you probably also want to move the binaries to somewhere inside your PATH.
 
@@ -22,12 +22,18 @@ For convenience, you probably also want to move the binaries to somewhere inside
 
 zxc is comprised of 2 binaries: `zig` and `zxc`.
 
+### `zig`
+
 `zig` is a drop-in replacement for your regular Zig. It runs the appropriate Zig version upon startup.
 As it contains interactive prompts to get default Zig versions and confirm installations,
-it also supports environment variables for answering these prompts in non-interactive environments (they are ignored in interactive environments):
+it also supports environment variables for answering these prompts in non-interactive environments (e.g., when run from a Bash script):
 
 - `ZXC_DEFAULT_ZIG_VERSION` - The Zig version to use when it cannot be automatically detected.
 - `ZXC_ALWAYS_INSTALL` - If non-empty, new Zig versions are always installed.
+
+These environment variables are ignored when running `zig` directly from the CLI.
+
+### `zxc`
 
 `zxc` is a CLI tool for managing installed Zig versions. This includes: installing, listing, and removing Zig versions.
 More detailed help can be viewed by running `zxc --help`.
