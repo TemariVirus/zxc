@@ -728,6 +728,7 @@ pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io) ![]const u8 {
         if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_path)) |ver| return ver;
     }
     return error.FileNotFound;
+    // TODO: read imaginary build.zig.zon
 }
 
 /// Resolves `wanted_version` to a compatible insalled Zig version.

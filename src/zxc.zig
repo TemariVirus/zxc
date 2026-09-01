@@ -381,9 +381,11 @@ fn realpathCmd(
 ) void {
     const zig_cli = @import("zig.zig");
 
-    const wanted_version = zig_cli.getWantedVersion(allocator, io, env_map) orelse
-        std.process.exit(1);
-    defer allocator.free(wanted_version);
+    var stdout = File.stdout().writerStreaming(io, &.{});
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    const info = zig_cli.getWantedZigInfo(allocator, &client, env_map, &stdout.interface, false);
+    defer info.deinit(allocator);
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
@@ -391,29 +393,9 @@ fn realpathCmd(
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory.", .{});
 
-    const actual_version =
-        files.resolveFromInstalledZigVersion(io, versions_path, wanted_version) orelse
-        ver: {
-            const base_dir = Dir.openDirAbsolute(io, base_path, .{}) catch |err|
-                fatal("Failed to open base directory: {t}", .{err});
-            defer base_dir.close(io);
-            var client: std.http.Client = .{ .allocator = allocator, .io = io };
-            defer client.deinit();
-            const index = files.getIndex(allocator, &client, base_dir) catch |err|
-                fatal("Failed to get index: {t}", .{err});
-            defer allocator.free(index);
-
-            break :ver files.getCompatibleZigVersion(index, wanted_version) catch |err| switch (err) {
-                error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-            } orelse
-                fatal("No available Zig version is compatible with {s}", .{wanted_version});
-        };
-
-    const zig_path = fs.joinPathsInPlace(&path_buf, versions_path.len, &.{ actual_version, files.ZIG_NAME }) catch
+    const zig_path = fs.joinPathsInPlace(&path_buf, versions_path.len, &.{ info.resolved_version, files.ZIG_NAME }) catch
         fatal("Out of memory.", .{});
-    var stdout = File.stdout().writerStreaming(io, &path_buf);
-    stdout.interface.end = zig_path.len;
-    stdout.interface.writeAll("\n") catch {};
+    stdout.interface.print("{s}\n", .{zig_path}) catch {};
     stdout.interface.flush() catch {};
 }
 

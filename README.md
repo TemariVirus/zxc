@@ -24,19 +24,21 @@ zxc is comprised of 2 binaries: `zig` and `zxc`.
 
 ### `zig`
 
-`zig` is a drop-in replacement for your regular Zig. It runs the appropriate Zig version upon startup.
-As it contains interactive prompts to get default Zig versions and confirm installations,
-it also supports environment variables for answering these prompts in non-interactive environments (e.g., when run from a Bash script):
-
-- `ZXC_DEFAULT_ZIG_VERSION` - The Zig version to use when it cannot be automatically detected.
-- `ZXC_ALWAYS_INSTALL` - If non-empty, new Zig versions are always installed.
-
-These environment variables are ignored when running `zig` directly from the CLI.
+`zig` is a drop-in replacement for your regular Zig. It runs the appropriate Zig version upon startup,
+or prompts the user if it cannot determine the version automatically.
 
 ### `zxc`
 
 `zxc` is a CLI tool for managing installed Zig versions. This includes: installing, listing, and removing Zig versions.
 More detailed help can be viewed by running `zxc --help`.
+
+### Environment variables
+
+Several environment variables affect zxc:
+
+- `ZXC_FORCE_ZIG_VERSION` - If non-empty, this Zig version is always used regardless of `build.zig.zon`. Good for pinning Zig versions in scripts.
+  Not recommended to set it to "master" as zxc does not track the pinned version of "master".
+- `ZXC_ALWAYS_INSTALL` - If non-empty, Zig versions are always installed when needed. Ignored when running `zig` from the CLI (answer those prompts!).
 
 ### Installing custom Zig versions
 
