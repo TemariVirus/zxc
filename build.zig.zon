@@ -9,7 +9,7 @@
             .hash = "known_folders-0.0.0-Fy-PJiDLAAB98m3uYUzatrTb2mO2fpvwx2zpSroEtfbO",
         },
         .lexopts = .{
-            .url = "https://codeberg.org/lukeflo/lexopts/archive/zig_0.17_master.tar.gz",
+            .url = "https://codeberg.org/lukeflo/lexopts/archive/3169d083c5c400a949c085f7b09c41c204e09d79.tar.gz",
             .hash = "lexopts-0.7.0-Zs2TZvBTAADIltZtXXzBAn8Jz-8hm3HMRVvXf2PRycxg",
         },
         .minizign = .{
