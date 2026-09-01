@@ -203,7 +203,7 @@ pub fn getWantedVersion(
         else => fatal("Failed to read build.zig.zon: {t}", .{err}),
     }) |v| return v;
 
-    if (!(term.isatty(Io.File.stdin().handle) catch false)) {
+    if (!term.isInteractive()) {
         const v = EnvVars.getNonEmpty(environ, EnvVars.DEFAULT_ZIG_VERSION) orelse
             fatal(
                 "Non-interactive mode requires the environment variable {s} to be set when the Zig version cannot be detected.",
@@ -361,7 +361,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         var cleanup_task = if (tmp_dir) |d| io.async(LockFile.cleanUpUnlocked, .{ io, d }) else null;
         defer if (cleanup_task) |*t| t.cancel(io); // Don't bother waiting for it to complete
 
-        confirm_install = if (term.isatty(stdin.file.handle) catch false)
+        confirm_install = if (term.isInteractive())
             confirmInstallPrompt(
                 wanted_version,
                 actual_version,

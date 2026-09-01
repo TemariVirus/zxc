@@ -106,3 +106,11 @@ pub fn isatty(fd: std.posix.fd_t) error{ FileNotOpen, Unexpected }!bool {
         else => return error.Unexpected,
     }
 }
+
+/// Can the user access stdin and stdout, to use an interactive TUI?
+pub fn isInteractive() bool {
+    const File = std.Io.File;
+    const interactive_stdin = isatty(File.stdin().handle) catch return false;
+    const interactive_stdout = isatty(File.stdout().handle) catch return false;
+    return interactive_stdin and interactive_stdout;
+}
