@@ -3,11 +3,15 @@
 const std = @import("std");
 const posix = std.posix;
 
-pub const Key = enum {
-    enter,
+pub const Key = enum(u8) {
+    sigint,
+    enter = '\n',
+    j = 'j',
+    k = 'k',
+    s = 's',
+    w = 'w',
     up,
     down,
-    sigint,
 };
 
 const KeyReader = @This();
@@ -66,8 +70,8 @@ pub fn read(self: KeyReader, io: std.Io) !Key {
     loop: switch (State.empty) {
         .empty => switch (try self.takeByte(io)) {
             0x03 => return .sigint,
-            '\n' => return .enter,
             0x1b => continue :loop .esc,
+            '\n', 'j', 'k', 's', 'w' => |b| return @enumFromInt(b),
             // This also means CSI apparently? I've never obsevered it myself though
             0x9b => continue :loop .csi,
             else => continue :loop .empty,

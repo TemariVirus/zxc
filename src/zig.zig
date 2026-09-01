@@ -168,8 +168,8 @@ fn selectVersionMenu(
             fatal("Unable to read user input: {t}", .{err});
         };
         switch (key) {
-            .up => choice = (choice + versions.len - 1) % versions.len,
-            .down => choice = (choice + 1) % versions.len,
+            .k, .w, .up => choice = (choice + versions.len - 1) % versions.len,
+            .j, .s, .down => choice = (choice + 1) % versions.len,
             .enter => break,
             .sigint => {
                 cleanupVersionMenu(stdout, kr);
