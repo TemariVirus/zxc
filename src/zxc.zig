@@ -359,9 +359,21 @@ fn lsCmd(
 
     std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
 
+    var seen: std.StringHashMap(void) = .init(allocator);
+    defer seen.deinit();
     if (versions.len == 0 and !opts.all) {
         stdout.interface.writeAll("No Zig versions installed.\n") catch {};
     } else for (versions) |v| {
+        // Duplicates can only occur between installed and non-installed versions,
+        // and other information is not printed to differentiate them
+        if (opts.name_only and opts.all) {
+            const seen_name = blk: {
+                const result = seen.getOrPut(v.name) catch break :blk false;
+                break :blk result.found_existing;
+            };
+            if (seen_name) continue;
+        }
+
         stdout.interface.print("{s}", .{v.name}) catch {};
         if (!opts.name_only) if (v.version) |ver| {
             stdout.interface.print(" ({s})", .{ver}) catch {};
