@@ -12,6 +12,7 @@ const options = @import("options");
 const files = @import("files.zig");
 const fs = @import("fs.zig");
 const http = @import("http.zig");
+const pv_store = @import("path_version_store.zig");
 const term = @import("term.zig");
 const LockFile = @import("LockFile.zig");
 
@@ -448,6 +449,25 @@ fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
     }
 }
 
+fn cleanUpInner(io: Io, env_map: *const EnvMap) !void {
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const base_path = try files.getBasePath(io, env_map, &path_buf);
+    const base_dir = try Dir.openDirAbsolute(io, base_path, .{});
+    defer base_dir.close(io);
+    try pv_store.cleanUpEntries(io, base_dir);
+
+    const tmp_dir = try files.openTmpDir(io, base_dir);
+    defer tmp_dir.close(io);
+    try LockFile.cleanUpUnlocked(io, tmp_dir);
+}
+
+fn cleanUp(io: Io, env_map: *const EnvMap) Io.Cancelable!void {
+    cleanUpInner(io, env_map) catch |err| switch (err) {
+        error.Canceled => |e| return e,
+        else => return,
+    };
+}
+
 // TODO: add command to set Zig version for cwd
 pub fn main(init: std.process.Init) void {
     const gpa = init.gpa;
@@ -468,17 +488,11 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(1);
     };
 
-    var cleanup_task = task: switch (args) {
-        .install, .rm => {
-            var path_buf: [Dir.max_path_bytes]u8 = undefined;
-            const base_path = files.getBasePath(io, init.environ_map, &path_buf) catch break :task null;
-            const tmp_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{"tmp"}) catch break :task null;
-            const tmp_dir = Dir.openDirAbsolute(io, tmp_path, .{ .iterate = true }) catch break :task null;
-            break :task io.concurrent(LockFile.cleanUpUnlocked, .{ io, tmp_dir }) catch null;
-        },
+    var cleanup_task = switch (args) {
+        .install, .rm => io.concurrent(cleanUp, .{ io, init.environ_map }) catch null,
         else => null, // Operation too short
     };
-    defer if (cleanup_task) |*t| t.cancel(io);
+    defer _ = if (cleanup_task) |*t| t.cancel(io) catch {};
 
     switch (args) {
         .help => stdout.interface.writeAll(Args.help_text) catch {},

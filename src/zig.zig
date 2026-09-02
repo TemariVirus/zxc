@@ -447,7 +447,7 @@ pub fn main(init: std.process.Init.Minimal) void {
             info.resolved_version,
             &stdout.interface,
         );
-        LockFile.cleanUpUnlocked(io, tmp_dir);
+        LockFile.cleanUpUnlocked(io, tmp_dir) catch {};
     }
 
     argv[0] = fs.joinPathsInPlace(

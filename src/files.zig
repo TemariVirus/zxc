@@ -16,16 +16,19 @@ const json = @import("json.zig");
 const pv_store = @import("path_version_store.zig");
 
 pub const SELF_TARGET = std.fmt.comptimePrint("{t}-{t}", .{ builtin.cpu.arch, builtin.os.tag });
-pub const BASE_DIR = "zxc";
-pub const VERSIONS_DIR = "versions";
 pub const ZIG_NAME = switch (builtin.target.os.tag) {
     .windows => "zig.exe",
     else => "zig",
 };
+
+pub const BASE_DIR = "zxc";
+pub const VERSIONS_DIR = "versions";
 /// The index is validated using a scanner with this stack size.
 /// Thus, any scanners using this stack size will never return an error when
 /// parsing the index.
 pub const INDEX_JSON_STACK_SIZE = 256;
+/// It is assumed that a Zig version has at most this many bytes.
+pub const MAX_VERSION_LEN = 256;
 
 pub const ArchiveFormat = enum {
     xz,
@@ -505,7 +508,7 @@ pub fn isNewestVersionInstalled(
         return isZigVersionInstalled(io, versions_path, version);
     }
 
-    var probe_buf: [64]u8 = undefined;
+    var probe_buf: [MAX_VERSION_LEN]u8 = undefined;
     const installed_version = probeInstalledVersion(io, versions_path, version, &probe_buf) orelse return false;
     var iter: IndexIterator = undefined;
     try iter.init(index);
@@ -579,7 +582,7 @@ fn collectInstalledVersions(
         const is_semver = !std.meta.isError(std.SemanticVersion.parse(name));
         const version = blk: {
             if (is_semver) break :blk null;
-            var probe_buf: [64]u8 = undefined;
+            var probe_buf: [MAX_VERSION_LEN]u8 = undefined;
             const v = probeInstalledVersion(io, versions_path, name, &probe_buf) orelse break :blk null;
             if (std.mem.eql(u8, name, v)) break :blk null;
             break :blk try allocator.dupe(u8, v);
@@ -740,7 +743,7 @@ pub fn resolveFromInstalledZigVersion(
     versions_path: []const u8,
     wanted_version: []const u8,
 ) ?[]const u8 {
-    var master_ver_buf: [64]u8 = undefined;
+    var master_ver_buf: [MAX_VERSION_LEN]u8 = undefined;
     if (isZigVersionInstalled(io, versions_path, wanted_version)) {
         return wanted_version;
     }

@@ -82,7 +82,7 @@ pub fn getLockedDir(self: LockFile, io: Io, options: Dir.CreateDirPathOpenOption
 
 /// Cleans up unused locks and their directories from a parent directory.
 /// `dir` must be opened with `.iterate = true`.
-pub fn cleanUpUnlocked(io: Io, dir: Dir) void {
+pub fn cleanUpUnlocked(io: Io, dir: Dir) Io.Cancelable!void {
     var fba_buf: [Dir.max_name_bytes]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&fba_buf);
     const allocator = fba.allocator();
@@ -91,7 +91,7 @@ pub fn cleanUpUnlocked(io: Io, dir: Dir) void {
     while (iter.next(io) catch return) |entry| {
         const key = getKeyFromName(entry.name) orelse entry.name;
         const lockf = LockFile.tryLock(allocator, io, dir, key) catch |err| switch (err) {
-            error.Canceled => return,
+            error.Canceled => |e| return e,
             else => continue,
         };
         defer lockf.unlock(allocator, io);
@@ -99,7 +99,7 @@ pub fn cleanUpUnlocked(io: Io, dir: Dir) void {
             .directory => dir.deleteTree(io, entry.name),
             else => dir.deleteFile(io, entry.name),
         } catch |err| switch (err) {
-            error.Canceled => return,
+            error.Canceled => |e| return e,
             else => continue,
         };
     }
