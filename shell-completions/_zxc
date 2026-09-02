@@ -4,6 +4,7 @@ _zxc() {
     local state
     local -a commands
     commands=(
+        'cwd:Set default Zig version for current directory'
         'install:Install a Zig version'
         'ls:List Zig versions'
         'realpath:Print the current Zig executable'
@@ -22,6 +23,9 @@ _zxc() {
             ;;
         args)
             case $words[1] in
+                cwd)
+                    _zxc_cwd
+                    ;;
                 i|install)
                     _arguments \
                         '--force[Overwrite the already installed version, if it exists]' \
@@ -41,6 +45,19 @@ _zxc() {
                         '*:version:($(zxc ls --name-only))'
                     ;;
             esac
+            ;;
+    esac
+}
+
+_zxc_cwd() {
+    _arguments \
+        '--help[Print the help message]' \
+        '1:version:->versions'
+
+    case $state in
+        versions)
+            local versions=($(zxc ls --all --name-only))
+            _describe -V 'version' versions
             ;;
     esac
 }

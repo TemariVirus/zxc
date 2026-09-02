@@ -18,6 +18,7 @@ const LockFile = @import("LockFile.zig");
 
 const Args = union(enum) {
     help: void,
+    cwd: CwdArgs,
     install: InstallArgs,
     ls: LsArgs,
     realpath: RealpathArgs,
@@ -31,6 +32,7 @@ const Args = union(enum) {
         \\Run `zxc COMMAND --help` for command-specific help.
         \\
         \\Commands:
+        \\  cwd           Set default Zig version for current directory
         \\  i, install    Install a Zig version
         \\  ls            List Zig versions
         \\  rp, realpath  Print the current Zig executable
@@ -51,6 +53,7 @@ const Args = union(enum) {
                     p.unknownOpt();
                 },
                 .pos_arg => |cmd| {
+                    if (std.mem.eql(u8, cmd, "cwd")) return .{ .cwd = .parse(p) };
                     if (std.mem.eql(u8, cmd, "i") or std.mem.eql(u8, cmd, "install")) return .{ .install = .parse(p) };
                     if (std.mem.eql(u8, cmd, "ls")) return .{ .ls = .parse(p) };
                     if (std.mem.eql(u8, cmd, "rm")) return .{ .rm = .parse(p) };
@@ -61,6 +64,56 @@ const Args = union(enum) {
             }
         }
         return null;
+    }
+};
+
+const CwdArgs = struct {
+    /// Valid semantic version, or "master".
+    version: []const u8 = "",
+    help: bool = false,
+
+    pub const help_text =
+        \\Usage: zxc cwd [options] VERSION
+        \\
+        \\Set default Zig version for the current working directory.
+        \\The Zig version is used when build.zig.zon cannot be found.
+        \\
+        \\Options:
+        \\  -h, --help   Print this help message
+        \\
+    ;
+
+    pub fn parse(p: *lexopts.Parser) CwdArgs {
+        var args: CwdArgs = .{};
+        while (p.next() catch |err| parserErr(p, err)) |arg| {
+            switch (arg) {
+                .option => |opt| {
+                    if (opt.match(.{ .short = 'h', .long = "help" })) {
+                        return .{ .help = true };
+                    } else {
+                        p.unknownOpt();
+                    }
+                },
+                .pos_arg => |value| {
+                    if (args.version.len == 0) {
+                        args.version = value;
+                    } else {
+                        fatal("Too many arguments.", .{});
+                    }
+                },
+            }
+        }
+
+        if (args.version.len == 0) {
+            fatal("Missing VERSION argument.", .{});
+        }
+        const is_semver = !std.meta.isError(std.SemanticVersion.parse(args.version));
+        if (!LockFile.isValidKey(args.version) or
+            (!std.mem.eql(u8, args.version, "master") and !is_semver))
+        {
+            fatal("Invalid version {s}\nVERSION argument must be a semantic version, or \"master\".", .{args.version});
+        }
+        return args;
     }
 };
 
@@ -228,6 +281,44 @@ fn parserErr(p: *const lexopts.Parser, err: lexopts.LexoptsError) noreturn {
         error.UnexpectedValue => p.unexpectedValue(),
         error.UnknownOption => p.unknownOpt(),
         error.MissingValue => p.missingValue(),
+    }
+}
+
+fn cwdCmd(
+    allocator: std.mem.Allocator,
+    io: Io,
+    env_map: *const EnvMap,
+    opts: CwdArgs,
+) void {
+    var stdout_buf: [1024]u8 = undefined;
+    var stdout = File.stdout().writerStreaming(io, &stdout_buf);
+    if (opts.help) {
+        stdout.interface.writeAll(CwdArgs.help_text) catch {};
+        return stdout.flush() catch {};
+    }
+
+    const base_dir = files.openBaseDir(io, env_map);
+    defer base_dir.close(io);
+    const is_semver = !std.meta.isError(std.SemanticVersion.parse(opts.version));
+    if (is_semver) {
+        pv_store.addEntryCwd(io, base_dir, opts.version) catch |err|
+            log.warn("Failed to store Zig version for this path: {t}", .{err});
+    } else {
+        var client: std.http.Client = .{ .allocator = allocator, .io = io };
+        defer client.deinit();
+        const index = files.getIndex(allocator, &client, base_dir) catch |err|
+            fatal("Failed to get index: {t}", .{err});
+        defer allocator.free(index);
+        const info = files.indexVersionInfo(index, opts.version) catch |err| switch (err) {
+            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        };
+        const version = if (info) |i| i.version else null;
+        if (version) |v| {
+            pv_store.addEntryCwd(io, base_dir, v) catch |err|
+                log.warn("Failed to store Zig version for this path: {t}", .{err});
+        } else {
+            fatal("Could not find version of {s} from index.", .{opts.version});
+        }
     }
 }
 
@@ -468,7 +559,6 @@ fn cleanUp(io: Io, env_map: *const EnvMap) Io.Cancelable!void {
     };
 }
 
-// TODO: add command to set Zig version for cwd
 pub fn main(init: std.process.Init) void {
     const gpa = init.gpa;
     const io = init.io;
@@ -489,13 +579,14 @@ pub fn main(init: std.process.Init) void {
     };
 
     var cleanup_task = switch (args) {
-        .install, .rm => io.concurrent(cleanUp, .{ io, init.environ_map }) catch null,
+        .cwd, .install, .rm => io.concurrent(cleanUp, .{ io, init.environ_map }) catch null,
         else => null, // Operation too short
     };
-    defer _ = if (cleanup_task) |*t| t.cancel(io) catch {};
+    defer _ = if (cleanup_task) |*t| t.await(io) catch {};
 
     switch (args) {
         .help => stdout.interface.writeAll(Args.help_text) catch {},
+        .cwd => |opts| cwdCmd(gpa, io, init.environ_map, opts),
         .install => |opts| installCmd(gpa, io, init.environ_map, opts),
         .ls => |opts| lsCmd(gpa, io, init.environ_map, opts),
         .realpath => realpathCmd(gpa, io, init.environ_map),

@@ -213,8 +213,8 @@ pub fn getWantedZigInfo(
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
         fatal("Failed to locate base directory: {t}", .{err});
-    const base_dir = Dir.openDirAbsolute(io, base_path, .{}) catch |err|
-        fatal("Failed to open base directory: {t}", .{err});
+    const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
+        fatal("Failed to open base directory '{s}': {t}", .{ base_path, err });
     defer base_dir.close(io);
     const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
         fatal("Out of memory.", .{});
