@@ -12,6 +12,7 @@ const LockFile = @import("LockFile.zig");
 const files = @import("files.zig");
 const fs = @import("fs.zig");
 const http = @import("http.zig");
+const pv_store = @import("path_version_store.zig");
 const term = @import("term.zig");
 
 const SAFETY_ON = switch (builtin.optimize) {
@@ -228,17 +229,16 @@ pub fn getWantedZigInfo(
             break :ver allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
         }
 
-        if (files.detectZigVersionFromCwd(allocator, io) catch |err| blk: switch (err) {
-            error.FileNotFound => {
-                log.info("No build.zig.zon found.", .{});
-                break :blk null;
-            },
+        if (files.detectZigVersionFromCwd(allocator, io, base_dir)) |maybe_ver| {
+            if (maybe_ver) |v| break :ver v;
+        } else |err| switch (err) {
             error.ParseZon => fatal(
+                // Extra space to line up the 2nd line
                 \\Failed to detect Zig version from build.zig.zon.
                 \\       Ensure the `minimum_zig_version` field is a valid semantic version.
             , .{}),
             else => fatal("Failed to read build.zig.zon: {t}", .{err}),
-        }) |v| break :ver v;
+        }
 
         if (!term.isInteractive()) {
             fatal(
@@ -254,7 +254,9 @@ pub fn getWantedZigInfo(
             const v, installed = selectVersionMenu(allocator, io, index, versions_path, stdout);
             used_user_input = true;
             use_exact_version = true;
-            // TODO: add choice to imaginary build.zig.zon
+            // TODO: Use actual version instead of "master"
+            pv_store.addEntryCwd(io, base_dir, v) catch |err|
+                log.warn("Failed to store Zig version for this path: {t}", .{err});
             break :ver v;
         }
         std.process.exit(1);

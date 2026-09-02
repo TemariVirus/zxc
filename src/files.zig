@@ -1,3 +1,4 @@
+// TODO: add SemverString type
 const std = @import("std");
 const log = std.log.default;
 const Allocator = std.mem.Allocator;
@@ -12,6 +13,7 @@ const known_folders = @import("known-folders");
 const fs = @import("fs.zig");
 const http = @import("http.zig");
 const json = @import("json.zig");
+const pv_store = @import("path_version_store.zig");
 
 pub const SELF_TARGET = std.fmt.comptimePrint("{t}-{t}", .{ builtin.cpu.arch, builtin.os.tag });
 pub const BASE_DIR = "zxc";
@@ -708,27 +710,27 @@ pub fn getZigVersionFromBuildZigZon(
 
 /// Tries to detect the required zig version based on the current working directory.
 /// If `build.zig.zon` is found but does not contain the zig version, returns `error.ParseZon`.
-/// If `build.zig.zon` is not found, returns `error.FileNotFound`.
-pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io) ![]const u8 {
+pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io, base_dir: Dir) !?[]const u8 {
     const zon_filename = "build.zig.zon";
 
     // This will usually succeed, allowing us to skip a syscall to get the current path
     if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_filename)) |ver| return ver;
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    var path: []const u8 = path: {
-        const n = try std.process.currentPath(io, &path_buf);
-        if (n > path_buf.len) return error.NameTooLong;
-        break :path path_buf[0..n];
-    };
+    var path: []const u8 = path_buf[0..try std.process.currentPath(io, &path_buf)];
     while (Dir.path.dirname(path)) |parent| {
         path = parent;
         const zon_path = fs.joinPathsInPlace(&path_buf, parent.len, &.{zon_filename}) catch
             return error.NameTooLong;
         if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_path)) |ver| return ver;
     }
-    return error.FileNotFound;
-    // TODO: read imaginary build.zig.zon
+
+    log.info("No build.zig.zon found.", .{});
+    path = path_buf[0..try std.process.currentPath(io, &path_buf)];
+    return pv_store.getVersion(allocator, io, base_dir, path) catch |err| {
+        log.err("Failed to get previously selected version: {t}", .{err});
+        return null;
+    };
 }
 
 /// Resolves `wanted_version` to a compatible insalled Zig version.

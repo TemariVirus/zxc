@@ -448,6 +448,7 @@ fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
     }
 }
 
+// TODO: add command to set Zig version for cwd
 pub fn main(init: std.process.Init) void {
     const gpa = init.gpa;
     const io = init.io;
