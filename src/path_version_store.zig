@@ -10,7 +10,6 @@ const STORE_FILENAME = "path_verions";
 const Iterator = struct {
     reader: *Io.Reader,
     entry_buf: []u8,
-    line_num: u64 = 1,
 
     /// Stores the previously selected Zig version for a path.
     pub const Entry = struct {
@@ -36,51 +35,31 @@ const Iterator = struct {
         allocator.free(self.entry_buf);
     }
 
-    fn warnBadFormat(self: *const Iterator) void {
-        log.warn(
-            "Bad format at line {d} of {s} file.",
-            .{ self.line_num, STORE_FILENAME },
-        );
-    }
-
     /// The returned entry is invalidated on the next call to `next`.
     pub fn next(self: *Iterator) !?Entry {
         var fba: std.heap.FixedBufferAllocator = .init(self.entry_buf);
         while (true) {
             const line = self.reader.takeDelimiter('\n') catch |err| switch (err) {
                 error.StreamTooLong => {
-                    log.warn(
-                        "Line {d} of {s} file was too long.",
-                        .{ self.line_num, STORE_FILENAME },
-                    );
                     _ = self.reader.discardDelimiterInclusive('\n') catch |err2| switch (err2) {
                         error.EndOfStream => return null,
                         else => |e| return e,
                     };
-                    self.line_num += 1;
                     continue;
                 },
                 else => |e| return e,
             } orelse return null;
-            defer self.line_num += 1;
 
-            const escaped_path, const version = std.mem.cut(u8, line, " => ") orelse {
-                self.warnBadFormat();
-                continue;
-            };
+            const escaped_path, const version = std.mem.cut(u8, line, " => ") orelse continue;
             const path = (std.json.parseFromSlice([]const u8, fba.allocator(), escaped_path, .{
                 .allocate = .alloc_if_needed,
             }) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
-                else => {
-                    self.warnBadFormat();
-                    continue;
-                },
+                else => continue,
             }).value;
 
             const is_semver = !std.meta.isError(std.SemanticVersion.parse(version));
             if (!is_semver or !Dir.path.isAbsolute(path)) {
-                self.warnBadFormat();
                 continue;
             }
             return .{
