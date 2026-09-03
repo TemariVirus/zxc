@@ -40,9 +40,7 @@ _zxc() {
                         '--name-only[Only print version name]'
                     ;;
                 rm)
-                    _arguments \
-                        '--help[Print the help message]' \
-                        '*:version:($(zxc ls --name-only))'
+                    _zxc_rm
                     ;;
             esac
             ;;
@@ -58,6 +56,38 @@ _zxc_cwd() {
         versions)
             local versions=($(zxc ls --all --name-only))
             _describe -V 'version' versions
+            ;;
+    esac
+}
+
+_zxc_rm() {
+    _arguments \
+        '--help[Print the help message]' \
+        '*:version:->versions'
+
+    case $state in
+        versions)
+            local all_versions=($(zxc ls --name-only))
+
+            local selected_versions=()
+            local i
+            for ((i=2; i<=$#words; i++)); do
+                # Skip options
+                if [[ ! "$words[i]" =~ ^- ]]; then
+                    selected_versions+=("$words[i]")
+                fi
+            done
+
+            # Remove selected versions
+            local available_versions=()
+            local ver
+            for ver in $all_versions; do
+                if [[ ! "${selected_versions[@]}" =~ "$ver" ]]; then
+                    available_versions+=("$ver")
+                fi
+            done
+
+            _describe -V 'version' available_versions
             ;;
     esac
 }
