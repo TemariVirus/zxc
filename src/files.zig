@@ -656,8 +656,8 @@ pub fn getCompatibleZigVersion(index: []const u8, version: []const u8) !?[]const
     var index_iter: IndexIterator = undefined;
     try index_iter.init(index);
     while (try index_iter.next()) |entry| {
-        if (std.mem.eql(u8, version, entry.name)) return version;
-        if (entry.version) |v| if (std.mem.eql(u8, version, v)) return version;
+        if (std.mem.eql(u8, version, entry.name)) return entry.name;
+        if (entry.version) |v| if (std.mem.eql(u8, version, v)) return entry.name;
         if (wanted_semver) |wanted| {
             const online = SemVer.parse(entry.version orelse entry.name) catch continue;
             if (wanted.major != online.major or wanted.minor != online.minor) continue;
