@@ -107,15 +107,48 @@ pub fn addEntry(
     try entry.replace(io);
 }
 
-/// Calls `addEntry` with the current working directory as the `path` parameter.
-pub fn addEntryCwd(
+/// Resolves `version` to a semantic version and adds the entry to associate it with `path`.
+pub fn storePathVersion(
     io: Io,
     base_dir: Dir,
+    versions_path: []const u8,
+    index: []const u8,
+    path: []const u8,
     version: []const u8,
+    use_installed: bool,
+) !void {
+    const is_semver = !std.meta.isError(std.SemanticVersion.parse(version));
+    var ver_buf: [files.MAX_VERSION_LEN]u8 = undefined;
+    const resolved_version = if (is_semver)
+        version
+    else if (use_installed)
+        files.probeInstalledVersion(
+            io,
+            versions_path,
+            version,
+            &ver_buf,
+        )
+    else
+        try files.indexVersion(index, version);
+    if (resolved_version) |v| {
+        return try addEntry(io, base_dir, path, v);
+    } else {
+        return error.UnknownVersion;
+    }
+}
+
+/// Calls `storePathVersion` with the current working directory as the `path` parameter.
+pub fn storePathVersionCwd(
+    io: Io,
+    base_dir: Dir,
+    versions_path: []const u8,
+    index: []const u8,
+    version: []const u8,
+    use_installed: bool,
 ) !void {
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try std.process.currentPath(io, &path_buf)];
-    try addEntry(io, base_dir, path, version);
+    try storePathVersion(io, base_dir, versions_path, index, path, version, use_installed);
 }
 
 fn deleteIfInvalidEntry(io: Io, store: Dir, entry: Dir.Entry) !void {

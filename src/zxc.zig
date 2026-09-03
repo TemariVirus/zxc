@@ -297,29 +297,25 @@ fn cwdCmd(
         return stdout.flush() catch {};
     }
 
-    const base_dir = files.openBaseDir(io, env_map);
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
+        fatal("Failed to locate base directory: {t}", .{err});
+    const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
+        fatal("Failed to open base directory '{s}': {t}", .{ base_path, err });
     defer base_dir.close(io);
-    const is_semver = !std.meta.isError(std.SemanticVersion.parse(opts.version));
-    if (is_semver) {
-        pv_store.addEntryCwd(io, base_dir, opts.version) catch |err|
-            log.warn("Failed to store Zig version for this path: {t}", .{err});
-    } else {
-        var client: std.http.Client = .{ .allocator = allocator, .io = io };
-        defer client.deinit();
-        const index = files.getIndex(allocator, &client, base_dir) catch |err|
-            fatal("Failed to get index: {t}", .{err});
-        defer allocator.free(index);
-        const info = files.indexVersionInfo(index, opts.version) catch |err| switch (err) {
-            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        };
-        const version = if (info) |i| i.version else null;
-        if (version) |v| {
-            pv_store.addEntryCwd(io, base_dir, v) catch |err|
-                log.warn("Failed to store Zig version for this path: {t}", .{err});
-        } else {
-            fatal("Could not find version of {s} from index.", .{opts.version});
-        }
-    }
+    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
+        fatal("Out of memory.", .{});
+
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    const index = files.getIndex(allocator, &client, base_dir) catch |err|
+        fatal("Failed to get index: {t}", .{err});
+    defer allocator.free(index);
+    pv_store.storePathVersionCwd(io, base_dir, versions_path, index, opts.version, false) catch |err| switch (err) {
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        error.UnknownVersion => fatal("Could not find version of {s} from index.", .{opts.version}),
+        else => fatal("Failed to store Zig version for this path: {t}", .{err}),
+    };
 }
 
 fn installCmd(

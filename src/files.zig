@@ -494,13 +494,13 @@ pub fn isZigVersionInstalledDir(io: Io, versions_dir: Dir, version: []const u8) 
     return true;
 }
 
-/// Returns the index entry for this given version.
-pub fn indexVersionInfo(index: []const u8, version: []const u8) !?IndexIterator.Entry {
+/// Returns the version according to the index for the given name.
+pub fn indexVersion(index: []const u8, name: []const u8) !?[]const u8 {
     var iter: IndexIterator = undefined;
     try iter.init(index);
     while (try iter.next()) |zig| {
-        if (!std.mem.eql(u8, zig.name, version)) continue;
-        return zig;
+        if (!std.mem.eql(u8, zig.name, name)) continue;
+        return zig.version;
     }
     return null;
 }
@@ -521,8 +521,7 @@ pub fn isNewestVersionInstalled(
 
     var probe_buf: [MAX_VERSION_LEN]u8 = undefined;
     const installed_version = probeInstalledVersion(io, versions_path, version, &probe_buf) orelse return false;
-    const info = try indexVersionInfo(index, version) orelse return false;
-    return if (info.version) |v|
+    return if (try indexVersion(index, version)) |v|
         std.mem.eql(u8, v, installed_version)
     else
         false;

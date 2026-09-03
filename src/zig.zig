@@ -254,9 +254,6 @@ pub fn getWantedZigInfo(
             const v, installed = selectVersionMenu(allocator, io, index, versions_path, stdout);
             used_user_input = true;
             use_exact_version = true;
-            // TODO: Use actual version instead of "master"
-            pv_store.addEntryCwd(io, base_dir, v) catch |err|
-                log.warn("Failed to store Zig version for this path: {t}", .{err});
             break :ver v;
         }
         std.process.exit(1);
@@ -280,6 +277,13 @@ pub fn getWantedZigInfo(
     };
     errdefer allocator.free(resolved_version);
 
+    if (used_user_input) {
+        const index = files.getIndex(allocator, client, base_dir) catch |err|
+            fatal("Failed to get index: {t}", .{err});
+        defer allocator.free(index);
+        pv_store.storePathVersionCwd(io, base_dir, versions_path, index, wanted_version, installed) catch |err|
+            log.warn("Failed to store Zig version for this path: {t}", .{err});
+    }
     return WantedZigInfo{
         .installed = installed,
         .used_user_input = used_user_input,
