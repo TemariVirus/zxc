@@ -434,7 +434,8 @@ fn realpathCmd(g: *files.Globals) void {
     const allocator = g.getScratchAllocator();
     const io = g.getIo();
 
-    var stdout = File.stdout().writerStreaming(io, &.{});
+    var stdout_buf: [1024]u8 = undefined;
+    var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     const info = zig_cli.getWantedZigInfo(allocator, g, null);
     defer info.deinit(allocator);
 
