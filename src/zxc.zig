@@ -284,12 +284,9 @@ fn parserErr(p: *const lexopts.Parser, err: lexopts.LexoptsError) noreturn {
     }
 }
 
-fn cwdCmd(
-    allocator: std.mem.Allocator,
-    io: Io,
-    env_map: *const EnvMap,
-    opts: CwdArgs,
-) void {
+fn cwdCmd(g: *files.Globals, opts: CwdArgs) void {
+    const io = g.getIo();
+
     var stdout_buf: [1024]u8 = undefined;
     var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
@@ -297,33 +294,17 @@ fn cwdCmd(
         return stdout.flush() catch {};
     }
 
-    var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base directory: {t}", .{err});
-    const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
-        fatal("Failed to open base directory '{s}': {t}", .{ base_path, err });
-    defer base_dir.close(io);
-    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory.", .{});
-
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    const index = files.getIndex(allocator, &client, base_dir) catch |err|
-        fatal("Failed to get index: {t}", .{err});
-    defer allocator.free(index);
-    pv_store.storePathVersionCwd(io, base_dir, versions_path, index, opts.version, false) catch |err| switch (err) {
+    pv_store.storePathVersionCwd(g, opts.version, false) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
         error.UnknownVersion => fatal("Could not find version of {s} from index.", .{opts.version}),
         else => fatal("Failed to store Zig version for this path: {t}", .{err}),
     };
 }
 
-fn installCmd(
-    allocator: std.mem.Allocator,
-    io: Io,
-    env_map: *const EnvMap,
-    opts: InstallArgs,
-) void {
+fn installCmd(g: *files.Globals, opts: InstallArgs) void {
+    const allocator = g.getScratchAllocator();
+    const io = g.getIo();
+
     var stdout_buf: [1024]u8 = undefined;
     var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
@@ -331,28 +312,17 @@ fn installCmd(
         return stdout.flush() catch {};
     }
 
-    var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base directory: {t}", .{err});
-    const versions_dir = blk: {
-        const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-            fatal("Out of memory.", .{});
-        break :blk Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
-            fatal("Unable to open versions directory: {t}", .{err});
-    };
+    const versions_dir = g.getBaseDir().createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
+        fatal("Unable to create versions directory: {t}", .{err});
     defer versions_dir.close(io);
-    const tmp_dir = blk: {
-        const tmp_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{"tmp"}) catch
-            fatal("Out of memory.", .{});
-        break :blk Dir.createDirPathOpen(.cwd(), io, tmp_path, .{}) catch |err|
-            fatal("Unable to open temporary directory: {t}", .{err});
-    };
+    const tmp_dir = files.openTmpDir(io, g.getBaseDir()) catch |err|
+        fatal("Unable to create temporary directory: {t}", .{err});
     defer tmp_dir.close(io);
 
     const lock = LockFile.lock(allocator, io, tmp_dir, opts.version) catch |err|
         fatal("Failed to create file lock: {t}", .{err});
     defer lock.unlock(allocator, io);
-    if (!opts.force and files.isZigVersionInstalledDir(io, versions_dir, opts.version)) {
+    if (!opts.force and files.isZigVersionInstalled(io, versions_dir, opts.version)) {
         fatal("Zig version {s} is already installed. Add the --force flag to overwrite it.", .{opts.version});
     }
 
@@ -378,7 +348,7 @@ fn installCmd(
         log.info("Extracting '{s}'...", .{filename});
         const extracted_name = files.extractZigTarball(allocator, io, f, filename, work_dir) catch |err|
             fatal("Failed to extract '{s}': {t}", .{ filename, err });
-        if (!files.isZigVersionInstalledDir(io, work_dir, extracted_name)) {
+        if (!files.isZigVersionInstalled(io, work_dir, extracted_name)) {
             fatal(
                 \\'{s}' had an unexpected directory structure or is incompatible with your system.
                 \\Installable tarballs must have the same structure as the official tarballs.
@@ -386,7 +356,7 @@ fn installCmd(
         }
         break :name extracted_name;
     } else name: {
-        if (!files.isZigVersionInstalledDir(io, .cwd(), opts.path)) {
+        if (!files.isZigVersionInstalled(io, .cwd(), opts.path)) {
             fatal("'{s}' does not contain an executable {s} file.", .{ opts.path, files.ZIG_NAME });
         }
         log.info("Copying '{s}'...", .{opts.path});
@@ -402,12 +372,10 @@ fn installCmd(
     stdout.flush() catch {};
 }
 
-fn lsCmd(
-    allocator: std.mem.Allocator,
-    io: Io,
-    env_map: *const EnvMap,
-    opts: LsArgs,
-) void {
+fn lsCmd(g: *files.Globals, opts: LsArgs) void {
+    const allocator = g.getScratchAllocator();
+    const io = g.getIo();
+
     var stdout_buf: [1024]u8 = undefined;
     var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
@@ -415,36 +383,19 @@ fn lsCmd(
         return stdout.flush() catch {};
     }
 
-    var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base directory: {t}", .{err});
-    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory.", .{});
-
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    const versions = if (opts.all) blk: {
-        const base_dir = Dir.createDirPathOpen(.cwd(), io, base_path, .{}) catch |err|
-            fatal("Failed to open base directory '{s}': {t}", .{ base_path, err });
-        defer base_dir.close(io);
-        var client: std.http.Client = .{ .allocator = allocator, .io = io };
-        defer client.deinit();
-        const index = files.getIndex(allocator, &client, base_dir) catch |err|
-            fatal("Failed to get index: {t}", .{err});
-        defer allocator.free(index);
-        break :blk files.getAllVersions(arena.allocator(), io, versions_path, index) catch |err| switch (err) {
-            error.OutOfMemory => fatal("Out of memory.", .{}),
-            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-            else => fatal("Unable to open versions directory: {t}", .{err}),
-        };
-    } else
+    const versions = files.getAllVersions(
+        arena.allocator(),
+        io,
+        g.env_map,
+        g.getBaseDir(),
         // Pass empty index to only get installed versions
-        files.getAllVersions(arena.allocator(), io, versions_path, "{}") catch |err| switch (err) {
-            error.OutOfMemory => fatal("Out of memory.", .{}),
-            error.UnexpectedFormat => unreachable,
-            else => fatal("Unable to open versions directory: {t}", .{err}),
-        };
-
+        if (opts.all) g.getIndex() else "{}",
+    ) catch |err| switch (err) {
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        else => fatal("Unable to retrieve versions: {t}", .{err}),
+    };
     std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
 
     var seen: std.StringHashMap(void) = .init(allocator);
@@ -474,32 +425,30 @@ fn lsCmd(
     stdout.flush() catch {};
 }
 
-fn realpathCmd(
-    allocator: std.mem.Allocator,
-    io: Io,
-    env_map: *const EnvMap,
-) void {
+fn realpathCmd(g: *files.Globals) void {
     const zig_cli = @import("zig.zig");
+    const allocator = g.getScratchAllocator();
+    const io = g.getIo();
 
     var stdout = File.stdout().writerStreaming(io, &.{});
-    var client: std.http.Client = .{ .allocator = allocator, .io = io };
-    defer client.deinit();
-    const info = zig_cli.getWantedZigInfo(allocator, &client, env_map, &stdout.interface, false);
+    const info = zig_cli.getWantedZigInfo(allocator, g, &stdout.interface, false);
     defer info.deinit(allocator);
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
+    const base_path = files.getBasePath(io, g.env_map, &path_buf) catch |err|
         fatal("Failed to locate base directory: {t}", .{err});
-    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory.", .{});
-
-    const zig_path = fs.joinPathsInPlace(&path_buf, versions_path.len, &.{ info.resolved_version, files.ZIG_NAME }) catch
-        fatal("Out of memory.", .{});
-    stdout.interface.print("{s}\n", .{zig_path}) catch {};
+    stdout.interface.print("{f}\n", .{Dir.path.fmtJoin(&.{
+        base_path,
+        files.VERSIONS_DIR,
+        info.resolved_version,
+        files.ZIG_NAME,
+    })}) catch {};
     stdout.interface.flush() catch {};
 }
 
-fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
+fn rmCmd(g: *files.Globals, opts: RmArgs) void {
+    const io = g.getIo();
+
     var stdout_buf: [1024]u8 = undefined;
     var stdout = File.stdout().writerStreaming(io, &stdout_buf);
     if (opts.help) {
@@ -507,13 +456,7 @@ fn rmCmd(io: Io, env_map: *const EnvMap, opts: RmArgs) void {
         return stdout.flush() catch {};
     }
 
-    var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    const base_path = files.getBasePath(io, env_map, &path_buf) catch |err|
-        fatal("Failed to locate base directory: {t}", .{err});
-    const versions_path = fs.joinPathsInPlace(&path_buf, base_path.len, &.{files.VERSIONS_DIR}) catch
-        fatal("Out of memory.", .{});
-
-    const versions_dir = Dir.createDirPathOpen(.cwd(), io, versions_path, .{}) catch |err|
+    const versions_dir = g.getBaseDir().createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
         fatal("Unable to open versions directory: {t}", .{err});
     defer versions_dir.close(io);
     version_loop: while (opts.nextVersion()) |version| {
@@ -556,8 +499,9 @@ fn cleanUp(io: Io, env_map: *const EnvMap) Io.Cancelable!void {
 }
 
 pub fn main(init: std.process.Init) void {
-    const gpa = init.gpa;
     const io = init.io;
+    var g: files.Globals = .init(init.gpa, io, init.environ_map);
+    defer g.deinit();
 
     var stdout = File.stdout().writerStreaming(io, &.{});
     const argv = init.minimal.args.toSlice(init.arena.allocator()) catch
@@ -582,11 +526,11 @@ pub fn main(init: std.process.Init) void {
 
     switch (args) {
         .help => stdout.interface.writeAll(Args.help_text) catch {},
-        .cwd => |opts| cwdCmd(gpa, io, init.environ_map, opts),
-        .install => |opts| installCmd(gpa, io, init.environ_map, opts),
-        .ls => |opts| lsCmd(gpa, io, init.environ_map, opts),
-        .realpath => realpathCmd(gpa, io, init.environ_map),
-        .rm => |opts| rmCmd(io, init.environ_map, opts),
+        .cwd => |opts| cwdCmd(&g, opts),
+        .install => |opts| installCmd(&g, opts),
+        .ls => |opts| lsCmd(&g, opts),
+        .realpath => realpathCmd(&g),
+        .rm => |opts| rmCmd(&g, opts),
         .version => stdout.interface.writeAll(options.version ++ "\n") catch {},
     }
     stdout.flush() catch {};

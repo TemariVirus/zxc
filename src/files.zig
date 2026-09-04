@@ -4,7 +4,7 @@ const log = std.log.default;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Dir = Io.Dir;
-const Environ = std.process.Environ;
+const EnvMap = std.process.Environ.Map;
 const assert = std.debug.assert;
 const fatal = std.process.fatal;
 
@@ -165,7 +165,7 @@ pub const InstalledZigIterator = struct {
             fatal("Failed to iterate versions directory: {t}", .{err})) |entry|
         {
             if (entry.kind == .directory and
-                isZigVersionInstalledDir(io, self.versionsDir(), entry.name))
+                isZigVersionInstalled(io, self.versionsDir(), entry.name))
             {
                 return entry.name;
             }
@@ -174,12 +174,62 @@ pub const InstalledZigIterator = struct {
     }
 };
 
-pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
+pub const Globals = struct {
+    // Meant to be directly accessed as read-only
+    client: std.http.Client,
+    env_map: *const EnvMap,
+    arena: std.heap.ArenaAllocator,
+
+    base_dir: ?Dir = null,
+    // Backed by `arena`.
+    index: ?[]const u8 = null,
+
+    pub fn init(allocator: Allocator, io: Io, env_map: *const EnvMap) Globals {
+        return .{
+            .client = .{ .allocator = allocator, .io = io },
+            .env_map = env_map,
+            .arena = .init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Globals) void {
+        const io = self.getIo();
+        self.client.deinit();
+        self.arena.deinit();
+        if (self.base_dir) |d| d.close(io);
+
+        self.* = undefined;
+    }
+
+    pub fn getScratchAllocator(self: *Globals) std.mem.Allocator {
+        return self.client.allocator;
+    }
+
+    pub fn getIo(self: Globals) Io {
+        return self.client.io;
+    }
+
+    pub fn getBaseDir(self: *Globals) Dir {
+        if (self.base_dir) |d| return d;
+        self.base_dir = openBaseDir(self.getIo(), self.env_map) catch |err|
+            fatal("Failed to open base directory: {t}", .{err});
+        return self.base_dir.?;
+    }
+
+    pub fn getIndex(self: *Globals) []const u8 {
+        if (self.index) |idx| return idx;
+        self.index = getIndexNoCache(self.arena.allocator(), &self.client, self.getBaseDir()) catch |err|
+            fatal("Failed to get index: {t}", .{err});
+        return self.index.?;
+    }
+};
+
+pub fn getBasePath(io: Io, env_map: *const EnvMap, buf: []u8) ![]u8 {
     var fba: std.heap.FixedBufferAllocator = .init(buf);
     const cache_path = try known_folders.getPath(
         io,
         fba.allocator(),
-        environ,
+        env_map,
         .cache,
     ) orelse return error.CacheDirNotFound;
     if (!Dir.path.isAbsolute(cache_path)) return error.CacheDirNotFound;
@@ -187,12 +237,10 @@ pub fn getBasePath(io: Io, environ: *const Environ.Map, buf: []u8) ![]u8 {
 }
 
 /// Opens and returns zxc's base directory.
-pub fn openBaseDir(io: Io, environ: *const Environ.Map) Dir {
+pub fn openBaseDir(io: Io, env_map: *const EnvMap) !Dir {
     var buf: [Dir.max_path_bytes]u8 = undefined;
-    const path = getBasePath(io, environ, &buf) catch |err|
-        fatal("Failed to locate base directory: {t}", .{err});
-    return Dir.cwd().createDirPathOpen(io, path, .{}) catch |err|
-        fatal("Failed to open base directory '{s}': {t}", .{ path, err });
+    const path = try getBasePath(io, env_map, &buf);
+    return try Dir.cwd().createDirPathOpen(io, path, .{});
 }
 
 /// Opens and returns zxc's tmp directory with `.iterate = true`.
@@ -302,7 +350,7 @@ fn getIndexIfValid(
 }
 
 /// Returns the Zig index, downloading from the internet if necessary.
-pub fn getIndex(allocator: Allocator, client: *std.http.Client, base_dir: Dir) ![]const u8 {
+pub fn getIndexNoCache(allocator: Allocator, client: *std.http.Client, base_dir: Dir) ![]const u8 {
     const INDEX_URI = comptime std.Uri.parse("https://ziglang.org/download/index.json") catch unreachable;
     const R = @typeInfo(@TypeOf(getIndexIfValid)).@"fn".return_type.?;
     return getPerishableFile(
@@ -474,19 +522,7 @@ pub fn extractZigTarball(
 }
 
 /// Returns whether the given Zig version is installed.
-pub fn isZigVersionInstalled(io: Io, versions_path: []const u8, version: []const u8) bool {
-    var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
-    const path = Dir.path.join(
-        fba.allocator(),
-        &.{ versions_path, version, ZIG_NAME },
-    ) catch return false;
-    Dir.accessAbsolute(io, path, .{ .execute = true }) catch return false;
-    return true;
-}
-
-/// Similar to `isZigVersionInstalled`, but takes an open file handle to the versions directory.
-pub fn isZigVersionInstalledDir(io: Io, versions_dir: Dir, version: []const u8) bool {
+pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) bool {
     var path_buf: [Dir.max_name_bytes + 1 + ZIG_NAME.len]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
     const path = Dir.path.join(fba.allocator(), &.{ version, ZIG_NAME }) catch return false;
@@ -510,17 +546,18 @@ pub fn indexVersion(index: []const u8, name: []const u8) !?[]const u8 {
 /// Assumes `index` contains the latest version.
 pub fn isNewestVersionInstalled(
     io: Io,
+    env_map: *const EnvMap,
+    versions_dir: Dir,
     index: []const u8,
-    versions_path: []const u8,
     version: []const u8,
 ) !bool {
     const is_semver = !std.meta.isError(std.SemanticVersion.parse(version));
     if (is_semver) {
-        return isZigVersionInstalled(io, versions_path, version);
+        return isZigVersionInstalled(io, versions_dir, version);
     }
 
     var probe_buf: [MAX_VERSION_LEN]u8 = undefined;
-    const installed_version = probeInstalledVersion(io, versions_path, version, &probe_buf) orelse return false;
+    const installed_version = probeInstalledVersion(io, env_map, version, &probe_buf) orelse return false;
     return if (try indexVersion(index, version)) |v|
         std.mem.eql(u8, v, installed_version)
     else
@@ -531,17 +568,16 @@ pub fn isNewestVersionInstalled(
 /// `buffer` is used to store the result.
 pub fn probeInstalledVersion(
     io: Io,
-    versions_path: []const u8,
+    env_map: *const EnvMap,
     version: []const u8,
     buffer: []u8,
 ) ?[]const u8 {
-    assert(Dir.path.isAbsolute(versions_path));
-
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
-    const path = Dir.path.join(
-        fba.allocator(),
-        &.{ versions_path, version, ZIG_NAME },
+    const base_path = getBasePath(io, env_map, &path_buf) catch return null;
+    const path = fs.joinPathsInPlace(
+        &path_buf,
+        base_path.len,
+        &.{ VERSIONS_DIR, version, ZIG_NAME },
     ) catch return null;
     var zig_proc = std.process.spawn(io, .{
         .argv = &.{ path, "version" },
@@ -569,9 +605,9 @@ pub fn probeInstalledVersion(
 fn collectInstalledVersions(
     allocator: Allocator,
     io: Io,
+    env_map: *const EnvMap,
     versions: *std.ArrayList(ZigVersion),
     versions_dir: Dir,
-    versions_path: []const u8,
 ) !std.StringHashMap(usize) {
     const old_len = versions.items.len;
     var installed: std.StringHashMap(usize) = .init(allocator);
@@ -590,7 +626,7 @@ fn collectInstalledVersions(
         const version = blk: {
             if (is_semver) break :blk null;
             var probe_buf: [MAX_VERSION_LEN]u8 = undefined;
-            const v = probeInstalledVersion(io, versions_path, name, &probe_buf) orelse break :blk null;
+            const v = probeInstalledVersion(io, env_map, name, &probe_buf) orelse break :blk null;
             if (std.mem.eql(u8, name, v)) break :blk null;
             break :blk try allocator.dupe(u8, v);
         };
@@ -614,15 +650,16 @@ fn collectInstalledVersions(
 pub fn getAllVersions(
     allocator: Allocator,
     io: Io,
-    versions_path: []const u8,
+    env_map: *const EnvMap,
+    base_dir: Dir,
     index: []const u8,
 ) ![]ZigVersion {
     var versions: std.ArrayList(ZigVersion) = .empty;
     errdefer versions.deinit(allocator);
 
-    const versions_dir = Dir.openDirAbsolute(
+    const versions_dir = base_dir.openDir(
         io,
-        versions_path,
+        VERSIONS_DIR,
         .{ .iterate = true },
     ) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => null,
@@ -630,7 +667,7 @@ pub fn getAllVersions(
     };
     defer if (versions_dir) |vd| vd.close(io);
     var installed: std.StringHashMap(usize) = if (versions_dir) |vd|
-        try collectInstalledVersions(allocator, io, &versions, vd, versions_path)
+        try collectInstalledVersions(allocator, io, env_map, &versions, vd)
     else
         .init(allocator);
     defer installed.deinit();
@@ -747,14 +784,15 @@ pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io, base_dir: Dir) !?[]
 /// Returns `null` if no such version exists.
 pub fn resolveFromInstalledZigVersion(
     io: Io,
-    versions_path: []const u8,
+    env_map: *const EnvMap,
+    versions_dir: Dir,
     wanted_version: []const u8,
 ) ?[]const u8 {
     var master_ver_buf: [MAX_VERSION_LEN]u8 = undefined;
-    if (isZigVersionInstalled(io, versions_path, wanted_version)) {
+    if (isZigVersionInstalled(io, versions_dir, wanted_version)) {
         return wanted_version;
     }
-    if (probeInstalledVersion(io, versions_path, "master", &master_ver_buf)) |mv| blk: {
+    if (probeInstalledVersion(io, env_map, "master", &master_ver_buf)) |mv| blk: {
         const wanted = std.SemanticVersion.parse(wanted_version) catch break :blk;
         const master = std.SemanticVersion.parse(mv) catch break :blk;
         if (wanted.major == master.major and wanted.minor == master.minor) {
