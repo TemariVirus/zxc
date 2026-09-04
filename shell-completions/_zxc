@@ -54,7 +54,7 @@ _zxc_cwd() {
 
     case $state in
         versions)
-            local versions=($(zxc ls --all --name-only))
+            local versions=($(zxc ls --all --name-only 2>/dev/null))
             _describe -V 'version' versions
             ;;
     esac
@@ -67,7 +67,7 @@ _zxc_rm() {
 
     case $state in
         versions)
-            local all_versions=($(zxc ls --name-only))
+            local all_versions=($(zxc ls --name-only 2>/dev/null))
 
             local selected_versions=()
             local i
