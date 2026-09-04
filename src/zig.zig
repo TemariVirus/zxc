@@ -288,22 +288,27 @@ pub fn getWantedZigInfo(
 }
 
 fn confirmInstallPrompt(
-    wanted_version: []const u8,
-    actual_version: []const u8,
+    index: []const u8,
+    wanted_name: []const u8,
+    resolved_name: []const u8,
     stdin: *Io.Reader,
     stdout: *Io.Writer,
 ) !bool {
-    if (std.mem.eql(u8, wanted_version, actual_version)) {
-        stdout.print(
-            "Zig version {s} is not installed.\nInstall it? [Y/n] ",
-            .{wanted_version},
-        ) catch {};
+    if (std.mem.eql(u8, wanted_name, resolved_name)) {
+        stdout.print("Zig version {s} is not installed.\n", .{wanted_name}) catch {};
     } else {
         stdout.print(
-            "Zig version {s} is not installed or available, but version {s} is avaliable online.\nInstall it? [Y/n] ",
-            .{ wanted_version, actual_version },
+            "Zig version {s} is not installed or available, but version {s} ",
+            .{ wanted_name, resolved_name },
         ) catch {};
+        if (files.indexVersion(index, resolved_name) catch null) |v| {
+            if (!std.mem.eql(u8, resolved_name, v)) {
+                stdout.print("({s}) ", .{v}) catch {};
+            }
+        }
+        stdout.writeAll("is avaliable online.\n") catch {};
     }
+    stdout.writeAll("Install it? [Y/n] ") catch {};
     stdout.flush() catch {};
 
     const answer = try stdin.takeByte();
@@ -367,6 +372,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (!info.installed and !confirmed_install) {
         confirmed_install = if (term.isInteractive())
             confirmInstallPrompt(
+                g.getIndex(),
                 info.wanted.name(),
                 info.resolved.name(),
                 &stdin.interface,
