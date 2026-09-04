@@ -111,17 +111,18 @@ pub fn addEntry(
 pub fn storePathVersion(
     g: *files.Globals,
     path: []const u8,
-    version: []const u8,
+    version: files.Version,
     use_installed: bool,
 ) !void {
-    const is_semver = !std.meta.isError(std.SemanticVersion.parse(version));
     var ver_buf: [files.MAX_VERSION_LEN]u8 = undefined;
-    const resolved_version = if (is_semver)
-        version
-    else if (use_installed)
-        files.probeInstalledVersion(g.getIo(), g.env_map, version, &ver_buf)
-    else
-        try files.indexVersion(g.getIndex(), version);
+    const resolved_version = switch (version) {
+        .semver => |sv| sv.raw,
+        .custom => |name| if (use_installed)
+            files.probeInstalledVersion(g.getIo(), g.env_map, name, &ver_buf)
+        else
+            try files.indexVersion(g.getIndex(), name),
+    };
+
     if (resolved_version) |v| {
         return try addEntry(g.getIo(), g.getBaseDir(), path, v);
     } else {
@@ -130,7 +131,7 @@ pub fn storePathVersion(
 }
 
 /// Calls `storePathVersion` with the current working directory as the `path` parameter.
-pub fn storePathVersionCwd(g: *files.Globals, version: []const u8, use_installed: bool) !void {
+pub fn storePathVersionCwd(g: *files.Globals, version: files.Version, use_installed: bool) !void {
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const path = path_buf[0..try std.process.currentPath(g.getIo(), &path_buf)];
     try storePathVersion(g, path, version, use_installed);

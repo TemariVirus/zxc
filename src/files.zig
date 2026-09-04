@@ -1,4 +1,3 @@
-// TODO: add SemverString type
 const std = @import("std");
 const log = std.log.default;
 const Allocator = std.mem.Allocator;
@@ -10,6 +9,8 @@ const fatal = std.process.fatal;
 
 const builtin = @import("builtin");
 const known_folders = @import("known-folders");
+
+const LockFile = @import("LockFile.zig");
 const fs = @import("fs.zig");
 const http = @import("http.zig");
 const json = @import("json.zig");
@@ -55,6 +56,47 @@ pub const TarballInfo = struct {
     fallback_url: []const u8,
     name: []const u8,
     size: u64,
+};
+
+pub const SemverString = struct {
+    raw: []const u8,
+    /// Contains pointers into `raw`.
+    parsed: std.SemanticVersion,
+
+    pub fn parse(str: []const u8) !SemverString {
+        return .{
+            .raw = str,
+            .parsed = try .parse(str),
+        };
+    }
+};
+
+pub const Version = union(enum) {
+    semver: SemverString,
+    custom: []const u8,
+
+    pub fn parse(str: []const u8) error{InvalidVersionName}!Version {
+        if (SemverString.parse(str)) |semver| {
+            return .{ .semver = semver };
+        } else |_| {
+            if (!LockFile.isValidKey(str)) {
+                return error.InvalidVersionName;
+            }
+            return .{ .custom = str };
+        }
+    }
+
+    pub fn parseOrCrash(str: []const u8) Version {
+        return parse(str) catch fatal("Zig version cannot start with 'lock.'", .{});
+    }
+
+    /// The name of the folder that will store this version when installed.
+    pub fn name(self: Version) []const u8 {
+        return switch (self) {
+            .semver => |sv| sv.raw,
+            .custom => |s| s,
+        };
+    }
 };
 
 pub const ZigVersion = struct {
@@ -442,15 +484,15 @@ pub fn getMirrors(
     );
 }
 
-/// Returns info about the tarball for `zig_version` on `target`, or `null` if it does not exist.
+/// Returns info about the tarball for `zig_name` on `target`, or `null` if it does not exist.
 /// The result contains slices into `index`.
-pub fn getTarballInfo(index: []const u8, zig_version: []const u8, target: []const u8) error{UnexpectedFormat}!?TarballInfo {
+pub fn getTarballInfo(index: []const u8, zig_name: []const u8, target: []const u8) error{UnexpectedFormat}!?TarballInfo {
     var stack_buf: [INDEX_JSON_STACK_SIZE]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&stack_buf);
     // This scanner will never return an error
     var scanner: std.json.Scanner = .initCompleteInput(fba.allocator(), index);
 
-    json.skipToObjectKey(&scanner, zig_version) catch |err| switch (err) {
+    json.skipToObjectKey(&scanner, zig_name) catch |err| switch (err) {
         error.NoMoreKeys => return null,
         else => return error.UnexpectedFormat,
     };
@@ -522,10 +564,10 @@ pub fn extractZigTarball(
 }
 
 /// Returns whether the given Zig version is installed.
-pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version: []const u8) bool {
+pub fn isZigVersionInstalled(io: Io, versions_dir: Dir, version_name: []const u8) bool {
     var path_buf: [Dir.max_name_bytes + 1 + ZIG_NAME.len]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&path_buf);
-    const path = Dir.path.join(fba.allocator(), &.{ version, ZIG_NAME }) catch return false;
+    const path = Dir.path.join(fba.allocator(), &.{ version_name, ZIG_NAME }) catch return false;
     versions_dir.access(io, path, .{ .execute = true }) catch return false;
     return true;
 }
@@ -541,24 +583,24 @@ pub fn indexVersion(index: []const u8, name: []const u8) !?[]const u8 {
     return null;
 }
 
-/// Similar to `isZigVersionInstalled`, but checks if installed version
-/// is the latest when `version` is not a semantic version (i.e., assumed to be a rolling release).
+/// Similar to `isZigVersionInstalled`, but checks if installed version is the latest
+/// when `version` is not a semantic version (i.e., assumed to be a rolling release).
 /// Assumes `index` contains the latest version.
 pub fn isNewestVersionInstalled(
     io: Io,
     env_map: *const EnvMap,
     versions_dir: Dir,
     index: []const u8,
-    version: []const u8,
+    version: Version,
 ) !bool {
-    const is_semver = !std.meta.isError(std.SemanticVersion.parse(version));
-    if (is_semver) {
-        return isZigVersionInstalled(io, versions_dir, version);
+    switch (version) {
+        .semver => |sv| return isZigVersionInstalled(io, versions_dir, sv.raw),
+        .custom => {},
     }
 
     var probe_buf: [MAX_VERSION_LEN]u8 = undefined;
-    const installed_version = probeInstalledVersion(io, env_map, version, &probe_buf) orelse return false;
-    return if (try indexVersion(index, version)) |v|
+    const installed_version = probeInstalledVersion(io, env_map, version.name(), &probe_buf) orelse return false;
+    return if (try indexVersion(index, version.name())) |v|
         std.mem.eql(u8, v, installed_version)
     else
         false;
@@ -569,7 +611,7 @@ pub fn isNewestVersionInstalled(
 pub fn probeInstalledVersion(
     io: Io,
     env_map: *const EnvMap,
-    version: []const u8,
+    version_name: []const u8,
     buffer: []u8,
 ) ?[]const u8 {
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -577,7 +619,7 @@ pub fn probeInstalledVersion(
     const path = fs.joinPathsInPlace(
         &path_buf,
         base_path.len,
-        &.{ VERSIONS_DIR, version, ZIG_NAME },
+        &.{ VERSIONS_DIR, version_name, ZIG_NAME },
     ) catch return null;
     var zig_proc = std.process.spawn(io, .{
         .argv = &.{ path, "version" },
@@ -590,7 +632,7 @@ pub fn probeInstalledVersion(
     var reader = zig_proc.stdout.?.readerStreaming(io, buffer);
     return reader.interface.takeDelimiter('\n') catch |err| {
         log.warn("Failed to probe installed {s} version: {t}", .{
-            version,
+            version_name,
             switch (err) {
                 error.ReadFailed => reader.err.?,
                 else => err,
@@ -697,24 +739,26 @@ pub fn getAllVersions(
 
 /// Returns a version in `index` that is compatible with `version`, or `null` if it does not exist.
 /// The returned version is a slice from `index`.
-pub fn getCompatibleZigVersion(index: []const u8, version: []const u8) !?[]const u8 {
+pub fn getCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8 {
     const SemVer = std.SemanticVersion;
     var compatible_version: ?[]const u8 = null;
-    const wanted_semver: ?SemVer = SemVer.parse(version) catch null;
 
     var index_iter: IndexIterator = undefined;
     try index_iter.init(index);
     while (try index_iter.next()) |entry| {
-        if (std.mem.eql(u8, version, entry.name)) return entry.name;
-        if (entry.version) |v| if (std.mem.eql(u8, version, v)) return entry.name;
-        if (wanted_semver) |wanted| {
-            const online = SemVer.parse(entry.version orelse entry.name) catch continue;
-            if (wanted.major != online.major or wanted.minor != online.minor) continue;
-            // Prefer newer versions
-            if (compatible_version) |prev| {
-                if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
-            }
-            compatible_version = entry.name;
+        if (std.mem.eql(u8, version.name(), entry.name)) return entry.name;
+        if (entry.version) |v| if (std.mem.eql(u8, version.name(), v)) return entry.name;
+        switch (version) {
+            .semver => |wanted| {
+                const online = SemVer.parse(entry.version orelse entry.name) catch continue;
+                if (wanted.parsed.major != online.major or wanted.parsed.minor != online.minor) continue;
+                // Prefer newer versions
+                if (compatible_version) |prev| {
+                    if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
+                }
+                compatible_version = entry.name;
+            },
+            .custom => {},
         }
     }
 
@@ -780,20 +824,23 @@ pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io, base_dir: Dir) !?[]
     };
 }
 
-/// Resolves `wanted_version` to a compatible insalled Zig version.
+/// Resolves `wanted` to a compatible insalled Zig version.
 /// Returns `null` if no such version exists.
 pub fn resolveFromInstalledZigVersion(
     io: Io,
     env_map: *const EnvMap,
     versions_dir: Dir,
-    wanted_version: []const u8,
+    wanted_version: Version,
 ) ?[]const u8 {
     var master_ver_buf: [MAX_VERSION_LEN]u8 = undefined;
-    if (isZigVersionInstalled(io, versions_dir, wanted_version)) {
-        return wanted_version;
+    if (isZigVersionInstalled(io, versions_dir, wanted_version.name())) {
+        return wanted_version.name();
     }
     if (probeInstalledVersion(io, env_map, "master", &master_ver_buf)) |mv| blk: {
-        const wanted = std.SemanticVersion.parse(wanted_version) catch break :blk;
+        const wanted = switch (wanted_version) {
+            .semver => |sv| sv.parsed,
+            .custom => break :blk,
+        };
         const master = std.SemanticVersion.parse(mv) catch break :blk;
         if (wanted.major == master.major and wanted.minor == master.minor) {
             return "master";

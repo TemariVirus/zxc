@@ -14,6 +14,7 @@ const fs = @import("fs.zig");
 const http = @import("http.zig");
 const pv_store = @import("path_version_store.zig");
 const term = @import("term.zig");
+const zig_cli = @import("zig.zig");
 const LockFile = @import("LockFile.zig");
 
 const Args = union(enum) {
@@ -68,7 +69,6 @@ const Args = union(enum) {
 };
 
 const CwdArgs = struct {
-    /// Valid semantic version, or "master".
     version: []const u8 = "",
     help: bool = false,
 
@@ -106,12 +106,6 @@ const CwdArgs = struct {
 
         if (args.version.len == 0) {
             fatal("Missing VERSION argument.", .{});
-        }
-        const is_semver = !std.meta.isError(std.SemanticVersion.parse(args.version));
-        if (!LockFile.isValidKey(args.version) or
-            (!std.mem.eql(u8, args.version, "master") and !is_semver))
-        {
-            fatal("Invalid version {s}\nVERSION argument must be a semantic version, or \"master\".", .{args.version});
         }
         return args;
     }
@@ -294,7 +288,18 @@ fn cwdCmd(g: *files.Globals, opts: CwdArgs) void {
         return stdout.flush() catch {};
     }
 
-    pv_store.storePathVersionCwd(g, opts.version, false) catch |err| switch (err) {
+    const version: files.Version = .parseOrCrash(opts.version);
+    const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch null;
+    defer if (versions_dir) |vd| vd.close(io);
+
+    // Ensure version is installed or available in index
+    if (versions_dir == null or !files.isZigVersionInstalled(io, versions_dir.?, version.name())) {
+        _ = files.getCompatibleZigVersion(g.getIndex(), version) catch |err| switch (err) {
+            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        } orelse fatal("No available Zig version is compatible with {s}", .{opts.version});
+    }
+
+    pv_store.storePathVersionCwd(g, version, false) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
         error.UnknownVersion => fatal("Could not find version of {s} from index.", .{opts.version}),
         else => fatal("Failed to store Zig version for this path: {t}", .{err}),
@@ -426,12 +431,11 @@ fn lsCmd(g: *files.Globals, opts: LsArgs) void {
 }
 
 fn realpathCmd(g: *files.Globals) void {
-    const zig_cli = @import("zig.zig");
     const allocator = g.getScratchAllocator();
     const io = g.getIo();
 
     var stdout = File.stdout().writerStreaming(io, &.{});
-    const info = zig_cli.getWantedZigInfo(allocator, g, &stdout.interface, false);
+    const info = zig_cli.getWantedZigInfo(allocator, g, null);
     defer info.deinit(allocator);
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -440,7 +444,7 @@ fn realpathCmd(g: *files.Globals) void {
     stdout.interface.print("{f}\n", .{Dir.path.fmtJoin(&.{
         base_path,
         files.VERSIONS_DIR,
-        info.resolved_version,
+        info.resolved.name(),
         files.ZIG_NAME,
     })}) catch {};
     stdout.interface.flush() catch {};
