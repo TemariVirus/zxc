@@ -20,6 +20,7 @@ const KeyReader = @This();
 const NO_INPUT: u8 = 255;
 
 stdin: std.Io.File,
+read_err: ?std.Io.File.Reader.Error = null,
 termios: posix.termios,
 
 pub fn init() !KeyReader {
@@ -48,17 +49,24 @@ pub fn deinit(self: KeyReader) void {
     posix.tcsetattr(self.stdin.handle, .FLUSH, self.termios) catch {};
 }
 
-fn takeByte(self: KeyReader, io: std.Io) !u8 {
+pub fn getErr(self: KeyReader) std.Io.File.Reader.Error {
+    return self.read_err.?;
+}
+
+fn takeByte(self: *KeyReader, io: std.Io) !u8 {
     var buf: [1]u8 = undefined;
     var reader = self.stdin.readerStreaming(io, &buf);
     return reader.interface.takeByte() catch |err| switch (err) {
-        error.ReadFailed => reader.err.?,
+        error.ReadFailed => {
+            self.read_err = reader.err.?;
+            return error.ReadFailed;
+        },
         error.EndOfStream => NO_INPUT,
     };
 }
 
 /// Returns the next key pressed.
-pub fn read(self: KeyReader, io: std.Io) !Key {
+pub fn read(self: *KeyReader, io: std.Io) !Key {
     // Guesswork based on me pressing a bunch of keys in Ghostty
     const State = enum {
         empty,

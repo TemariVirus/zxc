@@ -31,16 +31,29 @@ const EnvVars = struct {
     }
 };
 
-pub const WantedZigInfo = struct {
+const WantedZig = struct {
+    version: files.Version,
+    source: enum {
+        force,
+        build_zig_zon,
+        pv_store,
+    },
+};
+
+pub const CurrentZigInfo = struct {
     installed: bool,
     used_user_input: bool,
     wanted: files.Version,
     resolved: files.Version,
 
-    pub fn deinit(self: WantedZigInfo, allocator: Allocator) void {
+    pub fn deinit(self: CurrentZigInfo, allocator: Allocator) void {
         allocator.free(self.wanted.name());
         allocator.free(self.resolved.name());
     }
+};
+
+pub const UserInputArgs = struct {
+    stdout: *Io.Writer,
 };
 
 /// Installs the zig version. The comparessed tarball is temporarily stored in `tmp_dir`.
@@ -116,32 +129,15 @@ fn cleanupVersionMenu(stdout: *Io.Writer, kr: KeyReader) void {
     kr.deinit();
 }
 
-/// Returns the selected version name and whether it is already installed.
-fn selectVersionMenu(
+fn menuInner(
     allocator: Allocator,
     g: *files.Globals,
+    kr: *KeyReader,
+    versions: []const files.ZigVersion,
     stdout: *Io.Writer,
-) struct { []const u8, bool } {
+) !CurrentZigInfo {
     const MAX_MENU_HEIGHT = 10;
     const io = g.getIo();
-
-    var arena: std.heap.ArenaAllocator = .init(g.getScratchAllocator());
-    defer arena.deinit();
-    const versions = files.getAllVersions(
-        arena.allocator(),
-        io,
-        g.env_map,
-        g.getBaseDir(),
-        g.getIndex(),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => fatal("Out of memory.", .{}),
-        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        else => fatal("Unable to open versions directory: {t}", .{err}),
-    };
-    std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
-
-    const kr = KeyReader.init() catch |err| fatal("Unable to set up CLI menu: {t}", .{err});
-    defer cleanupVersionMenu(stdout, kr);
 
     term.setCursorVisibility(stdout, false) catch {};
     stdout.writeAll(
@@ -177,112 +173,188 @@ fn selectVersionMenu(
         term.previousLine(stdout, menu_height) catch {};
         stdout.flush() catch {};
 
-        const key = kr.read(io) catch |err| {
-            cleanupVersionMenu(stdout, kr);
-            fatal("Unable to read user input: {t}", .{err});
-        };
+        const key = try kr.read(io);
         switch (key) {
             .k, .w, .up => choice = (choice + versions.len - 1) % versions.len,
             .j, .s, .down => choice = (choice + 1) % versions.len,
             .enter => break,
-            .sigint => {
-                cleanupVersionMenu(stdout, kr);
-                std.process.exit(130); // Typical for dying by SIGINT
-            },
+            .sigint => return error.ReceivedSigint,
         }
     }
 
-    const chosen = allocator.dupe(u8, versions[choice].name) catch {
-        cleanupVersionMenu(stdout, kr);
-        fatal("Out of memory.", .{});
-    };
+    const chosen = try allocator.dupe(u8, versions[choice].name);
     errdefer allocator.free(chosen);
-    return .{ chosen, versions[choice].installed };
+    const chosen2 = try allocator.dupe(u8, chosen);
+    errdefer allocator.free(chosen2);
+    return .{
+        .installed = versions[choice].installed,
+        .used_user_input = true,
+        // Must be seperate allocations
+        .wanted = try .parse(chosen),
+        .resolved = try .parse(chosen2),
+    };
 }
 
-pub fn getWantedZigInfo(
+/// Returns the selected version as both `wanted` and `resolved`.
+fn selectVersionMenu(
     allocator: Allocator,
     g: *files.Globals,
+    stdout: *Io.Writer,
+) CurrentZigInfo {
+    const io = g.getIo();
+
+    var arena: std.heap.ArenaAllocator = .init(g.getScratchAllocator());
+    defer arena.deinit();
+    const versions = files.getAllVersions(
+        arena.allocator(),
+        io,
+        g.env_map,
+        g.getBaseDir(),
+        g.getIndex(),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => fatal("Out of memory.", .{}),
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        else => fatal("Unable to open versions directory: {t}", .{err}),
+    };
+    std.sort.pdq(files.ZigVersion, versions, {}, files.ZigVersion.greaterThan);
+
+    var kr = KeyReader.init() catch |err| fatal("Unable to set up CLI menu: {t}", .{err});
+    defer cleanupVersionMenu(stdout, kr);
+
+    return menuInner(allocator, g, &kr, versions, stdout) catch |err| {
+        cleanupVersionMenu(stdout, kr);
+        switch (err) {
+            error.ReadFailed => fatal("Unable to read user input: {t}", .{kr.getErr()}),
+            error.OutOfMemory => fatal("Out of memory.", .{}),
+            error.InvalidVersionName => fatal("Zig version cannot start with 'lock.'", .{}),
+            // Typical for dying by SIGINT
+            error.ReceivedSigint => std.process.exit(130),
+        }
+    };
+}
+
+fn getWantedZig(allocator: Allocator, g: *files.Globals) ?WantedZig {
+    const io = g.getIo();
+
+    if (EnvVars.getNonEmpty(g.env_map, EnvVars.FORCE_ZIG_VERSION)) |v| {
+        const version_string = allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
+        return .{
+            .version = .parseOrCrash(version_string),
+            .source = .force,
+        };
+    }
+
+    if (files.getZigVersionFromAnyZon(allocator, io)) |v| {
+        return .{
+            .version = .{ .semver = v },
+            .source = .build_zig_zon,
+        };
+    } else |err| switch (err) {
+        error.FileNotFound => log.info("No build.zig.zon found.", .{}),
+        error.ParseZon => fatal(
+            // Extra space to line up the 2nd line
+            \\Failed to detect Zig version from build.zig.zon.
+            \\       Ensure the `minimum_zig_version` field is a valid semantic version.
+        , .{}),
+        else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+    }
+
+    if (pv_store.getVersionCwd(allocator, io, g.getBaseDir())) |maybe_ver| {
+        if (maybe_ver) |v| {
+            return .{
+                .version = .{ .semver = v },
+                .source = .pv_store,
+            };
+        }
+    } else |err| {
+        log.err("Failed to get previously selected version: {t}", .{err});
+    }
+
+    if (!term.isInteractive()) {
+        fatal(
+            "Set the envivonment variable {s} or run `zig` to select a version first.",
+            .{EnvVars.FORCE_ZIG_VERSION},
+        );
+    }
+
+    return null;
+}
+
+/// Returns the resolved Zig version name and whether it is installed.
+fn resolveZigVersion(
+    allocator: Allocator,
+    g: *files.Globals,
+    wanted: WantedZig,
     /// Enabled if not `null`
-    enable_user_input: ?struct { stdout: *Io.Writer },
-) WantedZigInfo {
+    enable_user_input: ?UserInputArgs,
+) ?struct { []const u8, bool } {
     const io = g.getIo();
 
     const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch |err|
         fatal("Failed to open versions directory: {t}", .{err});
     defer versions_dir.close(io);
 
-    var installed = false;
-    var used_user_input = false;
-    var use_exact_version = false;
-    const wanted_version = ver: {
-        if (EnvVars.getNonEmpty(g.env_map, EnvVars.FORCE_ZIG_VERSION)) |v| {
-            installed = files.isZigVersionInstalled(io, versions_dir, v);
-            use_exact_version = true;
-            break :ver allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
-        }
+    if (files.resolveFromInstalledZigVersion(
+        io,
+        g.env_map,
+        versions_dir,
+        wanted.version,
+    )) |v| {
+        return .{
+            allocator.dupe(u8, v) catch fatal("Out of memory.", .{}),
+            true,
+        };
+    }
 
-        if (files.detectZigVersionFromCwd(allocator, io, g.getBaseDir())) |maybe_ver| {
-            if (maybe_ver) |v| break :ver v;
-        } else |err| switch (err) {
-            error.ParseZon => fatal(
-                // Extra space to line up the 2nd line
-                \\Failed to detect Zig version from build.zig.zon.
-                \\       Ensure the `minimum_zig_version` field is a valid semantic version.
-            , .{}),
-            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+    const v = files.getCompatibleZigVersion(g.getIndex(), wanted.version) catch |err| switch (err) {
+        error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+    } orelse {
+        switch (wanted.source) {
+            .pv_store => if (enable_user_input) |_| return null,
+            .build_zig_zon => {},
+            .force => unreachable,
         }
+        fatal("No available Zig version is compatible with {s}", .{wanted.version.name()});
+    };
 
-        if (!term.isInteractive()) {
-            fatal(
-                "Set the envivonment variable {s} or run `zig` to select a version first.",
-                .{EnvVars.FORCE_ZIG_VERSION},
-            );
-        }
+    return .{
+        allocator.dupe(u8, v) catch fatal("Out of memory.", .{}),
+        files.isZigVersionInstalled(io, versions_dir, v),
+    };
+}
 
+pub fn getCurrentZigInfo(
+    allocator: Allocator,
+    g: *files.Globals,
+    /// Enabled if not `null`
+    enable_user_input: ?UserInputArgs,
+) CurrentZigInfo {
+    const wanted = getWantedZig(allocator, g) orelse {
         if (enable_user_input) |args| {
-            const v, installed = selectVersionMenu(allocator, g, args.stdout);
-            used_user_input = true;
-            use_exact_version = true;
-            break :ver v;
+            return selectVersionMenu(allocator, g, args.stdout);
         }
         std.process.exit(1);
     };
-    errdefer allocator.free(wanted_version);
-    const wanted: files.Version = .parseOrCrash(wanted_version);
+    errdefer allocator.free(wanted.version.name());
 
-    const resolved_version = if (use_exact_version)
-        allocator.dupe(u8, wanted_version) catch fatal("Out of memory.", .{})
-    else if (files.resolveFromInstalledZigVersion(io, g.env_map, versions_dir, wanted)) |v| ver: {
-        installed = true;
-        break :ver allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
-    } else ver: {
-        const v = files.getCompatibleZigVersion(g.getIndex(), wanted) catch |err| switch (err) {
-            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        } orelse {
-            if (enable_user_input) |args| {
-                const v, installed = selectVersionMenu(allocator, g, args.stdout);
-                used_user_input = true;
-                use_exact_version = true;
-                break :ver v;
-            }
-            fatal("No available Zig version is compatible with {s}", .{wanted_version});
-        };
-
-        installed = files.isZigVersionInstalled(io, versions_dir, v);
-        break :ver allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
+    const resolved_version, const installed = resolveZigVersion(
+        allocator,
+        g,
+        wanted,
+        enable_user_input,
+    ) orelse {
+        if (enable_user_input) |args| {
+            return selectVersionMenu(allocator, g, args.stdout);
+        }
+        unreachable;
     };
     errdefer allocator.free(resolved_version);
     const resolved: files.Version = .parseOrCrash(resolved_version);
 
-    if (used_user_input) {
-        pv_store.storePathVersionCwd(g, resolved, installed) catch |err|
-            log.warn("Failed to store Zig version for this path: {t}", .{err});
-    }
-    return WantedZigInfo{
+    return CurrentZigInfo{
         .installed = installed,
-        .used_user_input = used_user_input,
-        .wanted = wanted,
+        .used_user_input = false,
+        .wanted = wanted.version,
         .resolved = resolved,
     };
 }
@@ -365,8 +437,12 @@ pub fn main(init: std.process.Init.Minimal) void {
     const argv: [][]const u8 = @ptrCast(@constCast(init.args.toSlice(arena.allocator()) catch
         fatal("Out of memory while parsing args.", .{})));
 
-    const info = getWantedZigInfo(gpa, &g, .{ .stdout = &stdout.interface });
+    const info = getCurrentZigInfo(gpa, &g, .{ .stdout = &stdout.interface });
     defer info.deinit(gpa);
+    if (info.used_user_input) {
+        pv_store.storePathVersionCwd(&g, info.resolved, info.installed) catch |err|
+            log.warn("Failed to store Zig version for this path: {t}", .{err});
+    }
 
     var confirmed_install = info.used_user_input;
     if (!info.installed and !confirmed_install) {

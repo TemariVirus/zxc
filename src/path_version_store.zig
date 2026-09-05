@@ -21,7 +21,7 @@ fn openStoreDir(io: Io, base_dir: Dir, options: Dir.OpenOptions) Dir.CreateDirPa
 }
 
 /// Changes the seek position of the file.
-fn readEntryVersion(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
+fn readEntryVersion(allocator: std.mem.Allocator, io: Io, file: Io.File) !files.SemverString {
     var read_buf: [files.MAX_VERSION_LEN + 1]u8 = undefined;
     var reader = file.reader(io, &read_buf);
     try reader.seekTo(0);
@@ -29,7 +29,9 @@ fn readEntryVersion(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
         error.ReadFailed => return reader.err.?,
         error.EndOfStream, error.StreamTooLong => return error.UnexpectedFormat,
     };
-    return try allocator.dupe(u8, line[0 .. line.len - 1]);
+    const version_string = try allocator.dupe(u8, line[0 .. line.len - 1]);
+    errdefer allocator.free(version_string);
+    return try .parse(version_string);
 }
 
 /// Changes the seek position of the file.
@@ -62,7 +64,7 @@ pub fn getVersion(
     io: Io,
     base_dir: Dir,
     path: []const u8,
-) !?[]const u8 {
+) !?files.SemverString {
     const store = openStoreDir(io, base_dir, .{}) catch |err| switch (err) {
         error.FileNotFound,
         error.NameTooLong,
@@ -82,12 +84,19 @@ pub fn getVersion(
     return try readEntryVersion(allocator, io, file);
 }
 
+/// Calls `getVersion` with the current working directory as the `path` parameter.
+pub fn getVersionCwd(allocator: std.mem.Allocator, io: Io, base_dir: Dir) !?files.SemverString {
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try std.process.currentPath(io, &path_buf)];
+    return try getVersion(allocator, io, base_dir, path);
+}
+
 /// Adds an entry to associate `path` with `version` in the store.
 pub fn addEntry(
     io: Io,
     base_dir: Dir,
     path: []const u8,
-    version: []const u8,
+    version: files.SemverString,
 ) !void {
     if (!Dir.path.isAbsolute(path)) return error.NotAbsolutePath;
 
@@ -97,7 +106,7 @@ pub fn addEntry(
     defer entry.deinit(io);
     var buf: [4096]u8 = undefined;
     var writer = entry.file.writer(io, &buf);
-    writer.interface.print("{s}\n{s}", .{ version, path }) catch |err| switch (err) {
+    writer.interface.print("{s}\n{s}", .{ version.raw, path }) catch |err| switch (err) {
         error.WriteFailed => return writer.err.?,
     };
     writer.end() catch |err| switch (err) {
@@ -114,17 +123,25 @@ pub fn storePathVersion(
     version: files.Version,
     use_installed: bool,
 ) !void {
+    const io = g.getIo();
+
     var ver_buf: [files.MAX_VERSION_LEN]u8 = undefined;
     const resolved_version = switch (version) {
-        .semver => |sv| sv.raw,
-        .custom => |name| if (use_installed)
-            files.probeInstalledVersion(g.getIo(), g.env_map, name, &ver_buf)
-        else
-            try files.indexVersion(g.getIndex(), name),
+        .semver => |sv| sv,
+        .custom => |name| blk: {
+            const version_string = if (use_installed)
+                files.probeInstalledVersion(io, g.env_map, name, &ver_buf)
+            else
+                try files.indexVersion(g.getIndex(), name);
+            if (version_string) |v| {
+                break :blk try files.SemverString.parse(v);
+            }
+            break :blk null;
+        },
     };
 
     if (resolved_version) |v| {
-        return try addEntry(g.getIo(), g.getBaseDir(), path, v);
+        return try addEntry(io, g.getBaseDir(), path, v);
     } else {
         return error.UnknownVersion;
     }

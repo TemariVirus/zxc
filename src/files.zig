@@ -767,12 +767,12 @@ pub fn getCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8
 
 /// Returns the zig version from `zon_path`, or null if the file does not exist.
 /// If the file at `zon_path` does not store the zig version, `error.ParseZon` is returned.
-pub fn getZigVersionFromBuildZigZon(
+pub fn getZigVersionFromZon(
     allocator: Allocator,
     io: Io,
     dir: Dir,
     zon_path: []const u8,
-) !?[]const u8 {
+) !?SemverString {
     const text = dir.readFileAllocOptions(
         io,
         zon_path,
@@ -795,17 +795,17 @@ pub fn getZigVersionFromBuildZigZon(
     );
     errdefer std.zon.parse.free(allocator, zon);
 
-    _ = std.SemanticVersion.parse(zon.minimum_zig_version) catch return error.ParseZon;
-    return zon.minimum_zig_version;
+    return SemverString.parse(zon.minimum_zig_version) catch return error.ParseZon;
 }
 
-/// Tries to detect the required zig version based on the current working directory.
+/// Returns the requested zig version based on `build.zig.zon` in the current directory or any parent directories.
 /// If `build.zig.zon` is found but does not contain the zig version, returns `error.ParseZon`.
-pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io, base_dir: Dir) !?[]const u8 {
+/// If `build.zig.zon` is not found, returns `error.FileNotFound`.
+pub fn getZigVersionFromAnyZon(allocator: Allocator, io: Io) !SemverString {
     const zon_filename = "build.zig.zon";
 
     // This will usually succeed, allowing us to skip a syscall to get the current path
-    if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_filename)) |ver| return ver;
+    if (try getZigVersionFromZon(allocator, io, .cwd(), zon_filename)) |ver| return ver;
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     var path: []const u8 = path_buf[0..try std.process.currentPath(io, &path_buf)];
@@ -813,15 +813,9 @@ pub fn detectZigVersionFromCwd(allocator: Allocator, io: Io, base_dir: Dir) !?[]
         path = parent;
         const zon_path = fs.joinPathsInPlace(&path_buf, parent.len, &.{zon_filename}) catch
             return error.NameTooLong;
-        if (try getZigVersionFromBuildZigZon(allocator, io, .cwd(), zon_path)) |ver| return ver;
+        if (try getZigVersionFromZon(allocator, io, .cwd(), zon_path)) |ver| return ver;
     }
-
-    log.info("No build.zig.zon found.", .{});
-    path = path_buf[0..try std.process.currentPath(io, &path_buf)];
-    return pv_store.getVersion(allocator, io, base_dir, path) catch |err| {
-        log.err("Failed to get previously selected version: {t}", .{err});
-        return null;
-    };
+    return error.FileNotFound;
 }
 
 /// Resolves `wanted` to a compatible insalled Zig version.

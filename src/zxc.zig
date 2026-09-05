@@ -436,7 +436,7 @@ fn realpathCmd(g: *files.Globals) void {
 
     var stdout_buf: [1024]u8 = undefined;
     var stdout = File.stdout().writerStreaming(io, &stdout_buf);
-    const info = zig_cli.getWantedZigInfo(allocator, g, null);
+    const info = zig_cli.getCurrentZigInfo(allocator, g, null);
     defer info.deinit(allocator);
 
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
