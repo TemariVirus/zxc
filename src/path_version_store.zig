@@ -161,7 +161,10 @@ fn deleteIfInvalidEntry(io: Io, store: Dir, entry: Dir.Entry) !void {
     }
 
     const invalidated = blk: {
-        const file = try store.openFile(io, entry.name, .{});
+        const file = store.openFile(io, entry.name, .{}) catch |err| switch (err) {
+            error.FileNotFound => return, // Someone else deleted it for us
+            else => |e| return e,
+        };
         defer file.close(io);
         var path_buf: [Dir.max_path_bytes]u8 = undefined;
         var fba: std.heap.FixedBufferAllocator = .init(&path_buf);

@@ -290,23 +290,22 @@ fn resolveZigVersion(
 ) ?struct { []const u8, bool } {
     const io = g.getIo();
 
-    const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch |err|
-        fatal("Failed to open versions directory: {t}", .{err});
-    defer versions_dir.close(io);
+    const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => null,
+        else => fatal("Failed to open versions directory: {t}", .{err}),
+    };
+    defer if (versions_dir) |vd| vd.close(io);
 
-    if (files.resolveFromInstalledZigVersion(
-        io,
-        g.env_map,
-        versions_dir,
-        wanted.version,
-    )) |v| {
-        return .{
-            allocator.dupe(u8, v) catch fatal("Out of memory.", .{}),
-            true,
-        };
+    if (versions_dir) |vd| {
+        if (files.resolveFromInstalledZigVersion(io, g.env_map, vd, wanted.version)) |v| {
+            return .{
+                allocator.dupe(u8, v) catch fatal("Out of memory.", .{}),
+                true,
+            };
+        }
     }
 
-    const v = files.getCompatibleZigVersion(g.getIndex(), wanted.version) catch |err| switch (err) {
+    const version = files.getCompatibleZigVersion(g.getIndex(), wanted.version) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
     } orelse {
         switch (wanted.source) {
@@ -317,9 +316,10 @@ fn resolveZigVersion(
         fatal("No available Zig version is compatible with {s}", .{wanted.version.name()});
     };
 
+    const installed = versions_dir != null and files.isZigVersionInstalled(io, versions_dir.?, version);
     return .{
-        allocator.dupe(u8, v) catch fatal("Out of memory.", .{}),
-        files.isZigVersionInstalled(io, versions_dir, v),
+        allocator.dupe(u8, version) catch fatal("Out of memory.", .{}),
+        installed,
     };
 }
 

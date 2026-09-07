@@ -487,7 +487,10 @@ fn rmCmd(g: *files.Globals, opts: RmArgs) void {
 fn cleanUpInner(io: Io, env_map: *const EnvMap) !void {
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base_path = try files.getBasePath(io, env_map, &path_buf);
-    const base_dir = try Dir.openDirAbsolute(io, base_path, .{});
+    const base_dir = Dir.openDirAbsolute(io, base_path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return,
+        else => |e| return e,
+    };
     defer base_dir.close(io);
     try pv_store.cleanUpEntries(io, base_dir);
 
