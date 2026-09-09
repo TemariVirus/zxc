@@ -61,6 +61,23 @@ To use the custom Zig versions, the `.minimum_zig_version` field of your `build.
 }
 ```
 
+### Installing shell completions (for zxc)
+
+Only zsh is supported currently. PRs to add support for more shells are welcome.
+
+Official shell completions for `zig` are available [here](https://codeberg.org/ziglang/shell-completions).
+
+#### zsh
+
+1. Copy `shell-completions/_zxc` into a directory.
+2. Add this directory to your `$fpath` if it isn't added already. You can do this by adding the following to your `~/.zshrc`:
+
+```
+fpath=(/path/to/parent_dir $fpath)
+```
+
+3. Run `source ~/.zshrc` and then `compinit` for the changes to take effect immediately.
+
 ## Why make yet another Zig version manager?
 
 Before making zxc, I was using [zvm](https://github.com/tristanisham/zvm), which even allows setting custom mirrors, index, and zls downloads.
