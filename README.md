@@ -8,6 +8,7 @@ Features:
 
 - 0 configuration
 - auto-detects required Zig version, or falls back to user input
+- remembers last selected Zig version of each path when `build.zig.zon` cannot be found
 - support for custom Zig versions
 - list and remove Zig versions
 - chooses a random mirror and verifies minisign signature
@@ -37,7 +38,7 @@ More detailed help can be viewed by running `zxc --help`.
 Several environment variables affect zxc:
 
 - `ZXC_FORCE_ZIG_VERSION` - If non-empty, this Zig version is always used regardless of `build.zig.zon`. Good for pinning Zig versions in scripts.
-  Not recommended to set it to "master" as zxc does not track the pinned version of "master".
+  Not recommended to set it to "master" as the "master" version is always changing.
 - `ZXC_ALWAYS_INSTALL` - If non-empty, Zig versions are always installed when needed. Ignored when running `zig` from the CLI (answer those prompts!).
 
 ### Installing custom Zig versions
