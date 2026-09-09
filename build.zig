@@ -8,14 +8,17 @@ pub fn build(b: *std.Build) !void {
 
     const release_step = b.step("release", "Compile release binaries");
     inline for ([_]std.Target.Query{
-        .{ .cpu_arch = .aarch64, .os_tag = .linux },
-        .{ .cpu_arch = .x86_64, .os_tag = .linux },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
+        // Fails to fetch the index in my macos VM with error.CertificateBundleLoadFailure
+        // .{ .cpu_arch = .aarch64, .os_tag = .macos, .abi = .none },
+        // .{ .cpu_arch = .x86_64, .os_tag = .macos, .abi = .none },
     }) |tq| {
         try installExes(
             b,
             std.fmt.comptimePrint("release/{t}-{t}", .{ tq.cpu_arch.?, tq.os_tag.? }),
             b.resolveTargetQuery(tq),
-            .ReleaseSmall,
+            .small,
             release_step,
         );
     }
@@ -51,6 +54,7 @@ fn installExes(
             .target = target,
             .optimize = optimize,
             .strip = strip,
+            .link_libc = true,
         }),
     });
     const zxc_exe = b.addExecutable(.{
@@ -60,6 +64,7 @@ fn installExes(
             .target = target,
             .optimize = optimize,
             .strip = strip,
+            .link_libc = true,
         }),
     });
 

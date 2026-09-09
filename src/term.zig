@@ -93,18 +93,15 @@ pub fn setCursorVisibility(writer: *Writer, show: bool) !void {
     }
 }
 
-// Not linking musl libc saves us ~100KB in binary size
-pub fn isatty(fd: std.posix.fd_t) error{ FileNotOpen, Unexpected }!bool {
-    const E = posix.E;
-
-    var tmp: posix.winsize = undefined;
-    const rc = linux.ioctl(fd, posix.T.IOCGWINSZ, @intFromPtr(&tmp));
-    switch (posix.errno(rc)) {
-        E.SUCCESS => return true,
-        E.NOTTY => return false,
-        E.BADF => return error.FileNotOpen,
-        else => return error.Unexpected,
-    }
+pub fn isatty(fd: std.c.fd_t) error{ FileNotOpen, Unexpected }!bool {
+    const E = std.c.E;
+    const rc = std.c.isatty(fd);
+    return switch (std.c.errno(rc)) {
+        E.SUCCESS => true,
+        E.NOTTY => false,
+        E.BADF => error.FileNotOpen,
+        else => error.Unexpected,
+    };
 }
 
 /// Can the user access stdin and stdout, to use an interactive TUI?
