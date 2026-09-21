@@ -244,19 +244,23 @@ fn getWantedZig(allocator: Allocator, g: *files.Globals) ?WantedZig {
         };
     }
 
+    var has_buildzigzon = true;
     if (files.getZigVersionFromAnyZon(allocator, io)) |v| {
         return .{
             .version = .{ .semver = v },
             .source = .build_zig_zon,
         };
-    } else |err| switch (err) {
-        error.FileNotFound => log.info("No build.zig.zon found.", .{}),
-        error.ParseZon => fatal(
-            // Extra space to line up the 2nd line
-            \\Failed to detect Zig version from build.zig.zon.
-            \\       Ensure the `minimum_zig_version` field is a valid semantic version.
-        , .{}),
-        else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+    } else |err| {
+        has_buildzigzon = err != error.FileNotFound;
+        switch (err) {
+            error.FileNotFound => log.info("No build.zig.zon found.", .{}),
+            error.ParseZon => log.warn(
+                // Extra space to line up the 2nd line
+                \\Failed to detect Zig version from build.zig.zon.
+                \\         Ensure the .minimum_zig_version field is a valid semantic version.
+            , .{}),
+            else => fatal("Failed to read build.zig.zon: {t}", .{err}),
+        }
     }
 
     if (pv_store.getVersionCwd(allocator, io, g.getBaseDir())) |maybe_ver| {
@@ -265,6 +269,12 @@ fn getWantedZig(allocator: Allocator, g: *files.Globals) ?WantedZig {
                 .version = .{ .semver = v },
                 .source = .pv_store,
             };
+        }
+        // TODO: remove this when we get a mandatory Zig version field
+        // https://github.com/ziglang/zig/issues/23985
+        if (has_buildzigzon) {
+            log.info("Use `zxc cwd <version>` to select a version without modifying build.zig.zon", .{});
+            std.process.exit(1);
         }
     } else |err| {
         log.err("Failed to get previously selected version: {t}", .{err});
