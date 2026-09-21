@@ -777,7 +777,9 @@ pub fn getZigVersionFromZon(
         io,
         zon_path,
         allocator,
-        .limited(16 * 1024 * 1024),
+        // Zig Maker sets a cap of 10MiB for build.zig.zon
+        // https://codeberg.org/ziglang/zig/src/branch/master/lib/compiler/Maker/Package/Manifest.zig#L13
+        .limited(10 * 1024 * 1024),
         .of(u8),
         0,
     ) catch |err| switch (err) {
