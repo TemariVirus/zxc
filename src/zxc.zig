@@ -303,12 +303,13 @@ fn cwdCmd(g: *files.Globals, opts: CwdArgs) void {
     if (files.getZigVersionFromAnyZon(g.getScratchAllocator(), io)) |_| {
         fatal("Version in build.zig.zon takes precedence over `zxc cwd`.", .{});
     } else |err| switch (err) {
+        error.FileNotFound => {},
         error.ParseZon => log.warn(
             // Add indentation to match how .minimum_zig_version is normally formatted in build.zig.zon
             \\Add the following to your build.zig.zon instead:
             \\    .minimum_zig_version = "{s}",
         , .{opts.version.name()}),
-        else => {},
+        else => fatal("Version in build.zig.zon takes precedence over `zxc cwd`.", .{}),
     }
 
     const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch null;
