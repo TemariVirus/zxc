@@ -69,7 +69,7 @@ const Args = union(enum) {
 };
 
 const CwdArgs = struct {
-    version: []const u8 = "",
+    version: files.Version = undefined,
     help: bool = false,
 
     pub const help_text =
@@ -85,6 +85,7 @@ const CwdArgs = struct {
 
     pub fn parse(p: *lexopts.Parser) CwdArgs {
         var args: CwdArgs = .{};
+        var version: []const u8 = "";
         while (p.next() catch |err| parserErr(p, err)) |arg| {
             switch (arg) {
                 .option => |opt| {
@@ -95,8 +96,8 @@ const CwdArgs = struct {
                     }
                 },
                 .pos_arg => |value| {
-                    if (args.version.len == 0) {
-                        args.version = value;
+                    if (version.len == 0) {
+                        version = value;
                     } else {
                         fatal("Too many arguments.", .{});
                     }
@@ -104,9 +105,10 @@ const CwdArgs = struct {
             }
         }
 
-        if (args.version.len == 0) {
+        if (version.len == 0) {
             fatal("Missing VERSION argument.", .{});
         }
+        args.version = .parseOrCrash(version);
         return args;
     }
 };
@@ -131,6 +133,24 @@ const InstallArgs = struct {
         \\  -h, --help   Print this help message
         \\
     ;
+
+    fn parseVersionOrCrash(version: []const u8) []const u8 {
+        if (version.len == 0) {
+            fatal("Missing VERSION argument.", .{});
+        }
+
+        fail: {
+            const parsed = files.Version.parse(version) catch |err| switch (err) {
+                error.InvalidVersionName => break :fail,
+            };
+            switch (parsed) {
+                .semver => {},
+                .custom => |c| if (!std.mem.eql(u8, c, "master")) break :fail,
+            }
+            return parsed.name();
+        }
+        fatal("Invalid version {s}\nVERSION argument must be a semantic version, or \"master\".", .{version});
+    }
 
     pub fn parse(p: *lexopts.Parser) InstallArgs {
         var args: InstallArgs = .{};
@@ -157,15 +177,7 @@ const InstallArgs = struct {
             }
         }
 
-        if (args.version.len == 0) {
-            fatal("Missing VERSION argument.", .{});
-        }
-        const is_semver = !std.meta.isError(std.SemanticVersion.parse(args.version));
-        if (!LockFile.isValidKey(args.version) or
-            (!std.mem.eql(u8, args.version, "master") and !is_semver))
-        {
-            fatal("Invalid version {s}\nVERSION argument must be a semantic version, or \"master\".", .{args.version});
-        }
+        args.version = parseVersionOrCrash(args.version);
         if (args.path.len == 0) {
             fatal("Missing PATH argument.", .{});
         }
@@ -288,20 +300,29 @@ fn cwdCmd(g: *files.Globals, opts: CwdArgs) void {
         return stdout.flush() catch {};
     }
 
-    const version: files.Version = .parseOrCrash(opts.version);
-    const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch null;
-    defer if (versions_dir) |vd| vd.close(io);
-
-    // Ensure version is installed or available in index
-    if (versions_dir == null or !files.isZigVersionInstalled(io, versions_dir.?, version.name())) {
-        _ = files.getCompatibleZigVersion(g.getIndex(), version) catch |err| switch (err) {
-            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        } orelse fatal("No available Zig version is compatible with {s}", .{opts.version});
+    if (files.getZigVersionFromAnyZon(g.getScratchAllocator(), io)) |_| {
+        fatal("Version in build.zig.zon takes precedence over `zxc cwd`.", .{});
+    } else |err| switch (err) {
+        error.ParseZon => log.warn(
+            // Add indentation to match how .minimum_zig_version is normally formatted in build.zig.zon
+            \\Add the following to your build.zig.zon instead:
+            \\    .minimum_zig_version = "{s}",
+        , .{opts.version.name()}),
+        else => {},
     }
 
-    pv_store.storePathVersionCwd(g, version, false) catch |err| switch (err) {
+    const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch null;
+    defer if (versions_dir) |vd| vd.close(io);
+    // Ensure version is installed or available in index
+    if (versions_dir == null or !files.isZigVersionInstalled(io, versions_dir.?, opts.version.name())) {
+        _ = files.getCompatibleZigVersion(g.getIndex(), opts.version) catch |err| switch (err) {
+            error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
+        } orelse fatal("No available Zig version is compatible with {s}", .{opts.version.name()});
+    }
+
+    pv_store.storePathVersionCwd(g, opts.version, false) catch |err| switch (err) {
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
-        error.UnknownVersion => fatal("Could not find version of {s} from index.", .{opts.version}),
+        error.UnknownVersion => fatal("Could not find version of {s} from index.", .{opts.version.name()}),
         else => fatal("Failed to store Zig version for this path: {t}", .{err}),
     };
 }
