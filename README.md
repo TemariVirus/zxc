@@ -19,6 +19,16 @@ Download the `zig` and `zxc` binaries from the releases page (TODO: release 1.0)
 
 For convenience, you probably also want to move the binaries to somewhere inside your PATH.
 
+## Uninstallation
+
+All of zxc's data and Zig installations are in a single directory. To uninstall zxc:
+
+1. delete zxc's directory. The location depends on your OS:
+    - Linux: `$XDG_CACHE_HOME/zxc` or `$HOME/.cache/zxc`
+    - MacOS: `$HOME/Library/Caches/zxc`
+    - Windows: `%LOCALAPPDATA%\Temp\zxc`
+2. delete the `zig` and `zxc` binaries
+
 ## How do I use zxc?
 
 zxc is comprised of 2 binaries: `zig` and `zxc`.
