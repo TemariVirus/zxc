@@ -33,15 +33,15 @@ const Args = union(enum) {
         \\Run `zxc COMMAND --help` for command-specific help.
         \\
         \\Commands:
-        \\  cwd           Set default Zig version for current directory
-        \\  i, install    Install a Zig version
-        \\  ls            List Zig versions
-        \\  rp, realpath  Print the current Zig executable
-        \\  rm            Delete an installed Zig version
-        \\  version       Prints the program's version
+        \\  cwd             Set default Zig version for current directory
+        \\  i,  install     Install a Zig version
+        \\  ls              List Zig versions
+        \\  rp, realpath    Print the current Zig executable
+        \\  rm              Delete an installed Zig version
+        \\  version         Prints the program's version
         \\
         \\Options:
-        \\  -h, --help    Print this help message
+        \\  -h, --help      Print this help message
         \\
     ;
 
@@ -79,7 +79,7 @@ const CwdArgs = struct {
         \\The Zig version is used when build.zig.zon cannot be found.
         \\
         \\Options:
-        \\  -h, --help   Print this help message
+        \\  -h, --help    Print this help message
         \\
     ;
 
@@ -126,11 +126,13 @@ const InstallArgs = struct {
         \\Install a Zig version from the tarball or directory at PATH.
         \\VERSION should match the expected .minimum_zig_version field of build.zig.zon
         \\
-        \\Supported tarball formats: .tar.xz, .zip
+        \\Supported tarball formats:
+        \\  .tar.xz
+        \\  .zip
         \\
         \\Options:
-        \\  -f, --force  Overwrite the already installed version, if it exists
-        \\  -h, --help   Print this help message
+        \\  -f, --force    Overwrite the already installed version, if it exists
+        \\  -h, --help     Print this help message
         \\
     ;
 
@@ -196,9 +198,9 @@ const LsArgs = struct {
         \\List installed Zig versions.
         \\
         \\Options:
-        \\  -a, --all        Also list versions available for download online
-        \\  -h, --help       Print this help message
-        \\  -n, --name-only  Only print version name
+        \\  -a, --all          Also list versions available for download online
+        \\  -h, --help         Print this help message
+        \\  -n, --name-only    Only print version name
         \\
     ;
 
@@ -233,7 +235,7 @@ const RealpathArgs = struct {
         \\Print the path to Zig executable that will be used when `zig` is run.
         \\
         \\Options:
-        \\  -h, --help  Print this help message
+        \\  -h, --help    Print this help message
         \\
     ;
 
@@ -264,7 +266,7 @@ const RmArgs = struct {
         \\Delete previously installed Zig versions.
         \\
         \\Options:
-        \\  -h, --help  Print this help message
+        \\  -h, --help    Print this help message
         \\
     ;
 
