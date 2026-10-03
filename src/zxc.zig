@@ -225,9 +225,30 @@ const LsArgs = struct {
 };
 
 const RealpathArgs = struct {
+    help: bool = false,
+
+    pub const help_text =
+        \\Usage: zxc realpath [options]
+        \\
+        \\Print the path to Zig executable that will be used when `zig` is run.
+        \\
+        \\Options:
+        \\  -h, --help  Print this help message
+        \\
+    ;
+
     pub fn parse(p: *lexopts.Parser) RealpathArgs {
-        while (p.next() catch |err| parserErr(p, err)) |_| {
-            fatal("`zxc realpath` does not accept arguments. Run `zxc --help` for help.", .{});
+        while (p.next() catch |err| parserErr(p, err)) |arg| {
+            switch (arg) {
+                .option => |opt| {
+                    if (opt.match(.{ .short = 'h', .long = "help" })) {
+                        return .{ .help = true };
+                    } else {
+                        p.unknownOpt();
+                    }
+                },
+                .pos_arg => fatal("`zxc realpath` does not accept arguments. Run `zxc realpath --help` for help.", .{}),
+            }
         }
         return .{};
     }
@@ -452,12 +473,17 @@ fn lsCmd(g: *files.Globals, opts: LsArgs) void {
     stdout.flush() catch {};
 }
 
-fn realpathCmd(g: *files.Globals) void {
+fn realpathCmd(g: *files.Globals, opts: RealpathArgs) void {
     const allocator = g.getScratchAllocator();
     const io = g.getIo();
 
     var stdout_buf: [1024]u8 = undefined;
     var stdout = File.stdout().writerStreaming(io, &stdout_buf);
+    if (opts.help) {
+        stdout.interface.writeAll(RealpathArgs.help_text) catch {};
+        return stdout.flush() catch {};
+    }
+
     const info = zig_cli.getCurrentZigInfo(allocator, g, null);
     defer info.deinit(allocator);
 
@@ -559,7 +585,7 @@ pub fn main(init: std.process.Init) void {
         .cwd => |opts| cwdCmd(&g, opts),
         .install => |opts| installCmd(&g, opts),
         .ls => |opts| lsCmd(&g, opts),
-        .realpath => realpathCmd(&g),
+        .realpath => |opts| realpathCmd(&g, opts),
         .rm => |opts| rmCmd(&g, opts),
         .version => stdout.interface.writeAll(options.version ++ "\n") catch {},
     }
