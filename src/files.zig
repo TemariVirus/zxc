@@ -737,6 +737,17 @@ pub fn getAllVersions(
     return try versions.toOwnedSlice(allocator);
 }
 
+fn isVersionCompatible(a: std.SemanticVersion, b: std.SemanticVersion) bool {
+    if (a.major != b.major or a.minor != b.minor) return false;
+    if (a.major == 0) {
+        // Special case handling for 0.x.y versions
+        const a_is_release = a.pre == null;
+        const b_is_release = b.pre == null;
+        return a.patch == b.patch and a_is_release == b_is_release;
+    }
+    return true;
+}
+
 /// Returns a version in `index` that is compatible with `version`, or `null` if it does not exist.
 /// The returned version is a slice from `index`.
 pub fn getCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8 {
@@ -751,7 +762,7 @@ pub fn getCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8
         switch (version) {
             .semver => |wanted| {
                 const online = SemVer.parse(entry.version orelse entry.name) catch continue;
-                if (wanted.parsed.major != online.major or wanted.parsed.minor != online.minor) continue;
+                if (!isVersionCompatible(wanted.parsed, online)) continue;
                 // Prefer newer versions
                 if (compatible_version) |prev| {
                     if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
@@ -763,6 +774,26 @@ pub fn getCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8
     }
 
     return compatible_version;
+}
+
+/// Similar to `getCompatibleZigVersion`, but only checks the major, minor and patch for compatibility.
+/// Returns the version rather than the version's name in the index.
+pub fn getPatchCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8 {
+    var index_iter: IndexIterator = undefined;
+    try index_iter.init(index);
+    while (try index_iter.next()) |entry| {
+        switch (version) {
+            .semver => |wanted| {
+                const online = std.SemanticVersion.parse(entry.version orelse entry.name) catch continue;
+                if (wanted.parsed.major != online.major or
+                    wanted.parsed.minor != online.minor or
+                    wanted.parsed.patch != online.patch) continue;
+                return entry.version orelse entry.name;
+            },
+            .custom => {},
+        }
+    }
+    return null;
 }
 
 /// Returns the zig version from `zon_path`, or null if the file does not exist.
@@ -847,7 +878,7 @@ pub fn resolveFromInstalledZigVersion(
             .custom => break :blk,
         };
         const master = std.SemanticVersion.parse(mv) catch break :blk;
-        if (wanted.major == master.major and wanted.minor == master.minor) {
+        if (isVersionCompatible(wanted, master)) {
             return "master";
         }
     }

@@ -323,6 +323,9 @@ fn resolveZigVersion(
             .build_zig_zon => {},
             .force => unreachable,
         }
+        if (files.getPatchCompatibleZigVersion(g.getIndex(), wanted.version) catch unreachable) |version| {
+            fatal("No available Zig version is compatible with {s}. Did you mean {s}?", .{ wanted.version.name(), version });
+        }
         fatal("No available Zig version is compatible with {s}", .{wanted.version.name()});
     };
 
