@@ -17,7 +17,8 @@ pub fn build(b: *Build) !void {
         .{ .cpu_arch = .aarch64, .os_tag = .macos, .cpu_model = .baseline },
         .{ .cpu_arch = .x86_64, .os_tag = .macos, .cpu_model = .baseline },
     }) |tq| {
-        try installReleaseArtifact(b, b.resolveTargetQuery(tq), release_step);
+        const install = try installReleaseArtifact(b, b.resolveTargetQuery(tq));
+        release_step.dependOn(&install.step);
     }
 }
 
@@ -97,18 +98,28 @@ fn buildExes(
     return .{ zig_exe, zxc_exe };
 }
 
-fn installReleaseArtifact(b: *Build, target: Build.ResolvedTarget, step: *Build.Step) !void {
+fn installReleaseArtifact(b: *Build, target: Build.ResolvedTarget) !*Build.Step.InstallFile {
     const zig_exe, const zxc_exe = try buildExes(b, target, .small);
+
+    const compress_exe = b.addExecutable(.{
+        .name = "compress-artifacts",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build/compress_artifacts.zig"),
+            .target = b.resolveTargetQuery(.{}), // Native
+            .optimize = .debug, // Prioritize compile speed over runtime speed
+            .strip = true,
+        }),
+    });
+    const run_compress = b.addRunArtifact(compress_exe);
+    run_compress.addArtifactArg2(zig_exe, .{});
+    run_compress.addArtifactArg2(zxc_exe, .{});
+    run_compress.expectExitCode(0);
+    const compressed_file = run_compress.captureStdOut(.{});
+
+    // TODO: choose between .tar.xz or .zip based on target OS
     const archive_path = b.fmt(
-        "release/{t}-{t}-zxc",
+        "release/{t}-{t}-zxc.tar.gz",
         .{ target.result.cpu.arch, target.result.os.tag },
     );
-    step.dependOn(&b.addInstallArtifact(
-        zig_exe,
-        .{ .dest_dir = .{ .override = .{ .custom = archive_path } } },
-    ).step);
-    step.dependOn(&b.addInstallArtifact(
-        zxc_exe,
-        .{ .dest_dir = .{ .override = .{ .custom = archive_path } } },
-    ).step);
+    return b.addInstallFile(compressed_file, archive_path);
 }
