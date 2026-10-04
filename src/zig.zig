@@ -300,19 +300,17 @@ fn resolveZigVersion(
 ) ?struct { []const u8, bool } {
     const io = g.getIo();
 
-    const versions_dir = g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => null,
-        else => fatal("Failed to open versions directory: {t}", .{err}),
-    };
-    defer if (versions_dir) |vd| vd.close(io);
-
-    if (versions_dir) |vd| {
-        if (files.resolveFromInstalledZigVersion(io, g.env_map, vd, wanted.version)) |v| {
+    if (g.getBaseDir().openDir(io, files.VERSIONS_DIR, .{})) |versions_dir| {
+        defer versions_dir.close(io);
+        if (files.resolveFromInstalledZigVersion(io, g.env_map, versions_dir, wanted.version)) |v| {
             return .{
                 allocator.dupe(u8, v) catch fatal("Out of memory.", .{}),
                 true,
             };
         }
+    } else |err| switch (err) {
+        error.FileNotFound, error.NotDir => {},
+        else => fatal("Failed to open versions directory: {t}", .{err}),
     }
 
     const version = files.getCompatibleZigVersion(g.getIndex(), wanted.version) catch |err| switch (err) {
@@ -329,7 +327,21 @@ fn resolveZigVersion(
         fatal("No available Zig version is compatible with {s}", .{wanted.version.name()});
     };
 
-    const installed = versions_dir != null and files.isZigVersionInstalled(io, versions_dir.?, version);
+    const installed = installed: switch (files.Version.parseOrCrash(version)) {
+        .semver => false,
+        .custom => {
+            var probe_buf: [files.MAX_VERSION_LEN]u8 = undefined;
+            const installed_version = files.probeInstalledVersion(io, g.env_map, version, &probe_buf) orelse
+                break :installed false;
+            const wanted_semver = switch (wanted.version) {
+                .semver => |sv| sv.parsed,
+                .custom => break :installed false,
+            };
+            const installed_semver = std.SemanticVersion.parse(installed_version) catch break :installed false;
+            break :installed files.isZigVersionCompatible(wanted_semver, installed_semver);
+        },
+    };
+
     return .{
         allocator.dupe(u8, version) catch fatal("Out of memory.", .{}),
         installed,

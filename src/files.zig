@@ -737,7 +737,8 @@ pub fn getAllVersions(
     return try versions.toOwnedSlice(allocator);
 }
 
-fn isVersionCompatible(a: std.SemanticVersion, b: std.SemanticVersion) bool {
+/// Returns whether 2 Zig versions are considered compatible with each other.
+pub fn isZigVersionCompatible(a: std.SemanticVersion, b: std.SemanticVersion) bool {
     if (a.major != b.major or a.minor != b.minor) return false;
     if (a.major == 0) {
         // Special case handling for 0.x.y versions
@@ -762,7 +763,7 @@ pub fn getCompatibleZigVersion(index: []const u8, version: Version) !?[]const u8
         switch (version) {
             .semver => |wanted| {
                 const online = SemVer.parse(entry.version orelse entry.name) catch continue;
-                if (!isVersionCompatible(wanted.parsed, online)) continue;
+                if (!isZigVersionCompatible(wanted.parsed, online)) continue;
                 // Prefer newer versions
                 if (compatible_version) |prev| {
                     if (online.order(SemVer.parse(prev) catch unreachable).compare(.lte)) continue;
@@ -878,7 +879,7 @@ pub fn resolveFromInstalledZigVersion(
             .custom => break :blk,
         };
         const master = std.SemanticVersion.parse(mv) catch break :blk;
-        if (isVersionCompatible(wanted, master)) {
+        if (isZigVersionCompatible(wanted, master)) {
             return "master";
         }
     }
