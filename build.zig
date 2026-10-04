@@ -8,11 +8,11 @@ pub fn build(b: *std.Build) !void {
 
     const release_step = b.step("release", "Compile release binaries");
     inline for ([_]std.Target.Query{
-        .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
-        .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux, .cpu_model = .baseline },
+        .{ .cpu_arch = .x86_64, .os_tag = .linux, .cpu_model = .baseline },
         // Fails to fetch the index in my macos VM with error.CertificateBundleLoadFailure
-        // .{ .cpu_arch = .aarch64, .os_tag = .macos, .abi = .none },
-        // .{ .cpu_arch = .x86_64, .os_tag = .macos, .abi = .none },
+        // .{ .cpu_arch = .aarch64, .os_tag = .macos, .cpu_model = .baseline },
+        // .{ .cpu_arch = .x86_64, .os_tag = .macos, .cpu_model = .baseline },
     }) |tq| {
         try installExes(
             b,
@@ -50,6 +50,7 @@ fn installExes(
         .debug, .safe => false,
         .fast, .small => true,
     };
+    const link_libc = target.result.os.tag != .linux;
 
     const zig_exe = b.addExecutable(.{
         .name = "zig",
@@ -58,8 +59,9 @@ fn installExes(
             .target = target,
             .optimize = optimize,
             .strip = strip,
-            .link_libc = true,
+            .link_libc = link_libc,
         }),
+        .linkage = if (link_libc) .dynamic else .static,
     });
     const zxc_exe = b.addExecutable(.{
         .name = "zxc",
@@ -68,8 +70,9 @@ fn installExes(
             .target = target,
             .optimize = optimize,
             .strip = strip,
-            .link_libc = true,
+            .link_libc = link_libc,
         }),
+        .linkage = if (link_libc) .dynamic else .static,
     });
 
     const known_folders = b.dependency("known_folders", .{

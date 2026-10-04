@@ -4,6 +4,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const Writer = std.Io.Writer;
 
+const builtin = @import("builtin");
 const http = @import("http.zig");
 
 const CSI = "\x1b[";
@@ -93,15 +94,34 @@ pub fn setCursorVisibility(writer: *Writer, show: bool) !void {
     }
 }
 
-pub fn isatty(fd: std.c.fd_t) error{ FileNotOpen, Unexpected }!bool {
-    const E = std.c.E;
-    const rc = std.c.isatty(fd);
-    return switch (std.c.errno(rc)) {
-        E.SUCCESS => true,
-        E.NOTTY => false,
-        E.BADF => error.FileNotOpen,
-        else => error.Unexpected,
-    };
+pub fn isatty(fd: std.posix.fd_t) error{ FileNotOpen, Unexpected }!bool {
+    switch (builtin.target.os.tag) {
+        .linux => return try isattyLinux(fd),
+        else => {
+            // TODO: implementations for MacOS and Windows that do not rely on libc
+            const E = std.c.E;
+            const rc = std.c.isatty(fd);
+            return switch (std.c.errno(rc)) {
+                E.SUCCESS => true,
+                E.NOTTY => false,
+                E.BADF => error.FileNotOpen,
+                else => error.Unexpected,
+            };
+        },
+    }
+}
+
+fn isattyLinux(fd: std.posix.fd_t) error{ FileNotOpen, Unexpected }!bool {
+    const E = posix.E;
+
+    var tmp: posix.winsize = undefined;
+    const rc = linux.ioctl(fd, posix.T.IOCGWINSZ, @intFromPtr(&tmp));
+    switch (posix.errno(rc)) {
+        E.SUCCESS => return true,
+        E.NOTTY => return false,
+        E.BADF => return error.FileNotOpen,
+        else => return error.Unexpected,
+    }
 }
 
 /// Can the user access stdin and stdout, to use an interactive TUI?
