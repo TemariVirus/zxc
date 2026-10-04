@@ -25,12 +25,16 @@ pub fn build(b: *std.Build) !void {
 }
 
 fn getOwnVersion(allocator: std.mem.Allocator) ![]const u8 {
-    const zon = try std.zon.parse.fromSliceAlloc(
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const zon = try std.zon.parse.fromSlice(
         struct { version: []const u8 },
-        allocator,
-        @embedFile("build.zig.zon"),
-        null,
-        .{ .ignore_unknown_fields = true },
+        .{
+            .gpa = allocator,
+            .arena = allocator,
+            .source = @embedFile("build.zig.zon"),
+            .diagnostics = &diag,
+            .ignore_unknown_fields = true,
+        },
     );
     return zon.version;
 }
@@ -39,7 +43,7 @@ fn installExes(
     b: *std.Build,
     comptime folder: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     step: *std.Build.Step,
 ) !void {
     const strip = switch (optimize) {

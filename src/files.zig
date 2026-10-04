@@ -16,7 +16,7 @@ const http = @import("http.zig");
 const json = @import("json.zig");
 const pv_store = @import("path_version_store.zig");
 
-pub const SELF_TARGET = std.fmt.comptimePrint("{t}-{t}", .{ builtin.cpu.arch, builtin.os.tag });
+pub const SELF_TARGET = std.fmt.comptimePrint("{t}-{t}", .{ builtin.target.cpu.arch, builtin.target.os.tag });
 pub const ZIG_NAME = switch (builtin.target.os.tag) {
     .windows => "zig.exe",
     else => "zig",
@@ -788,16 +788,25 @@ pub fn getZigVersionFromZon(
     };
     defer allocator.free(text);
 
-    const zon = try std.zon.parse.fromSliceAlloc(
-        struct { minimum_zig_version: []const u8 },
-        allocator,
-        text,
-        null,
-        .{ .ignore_unknown_fields = true },
-    );
-    errdefer std.zon.parse.free(allocator, zon);
+    const zig_version = ver: {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var diag: std.zon.parse.Diagnostics = undefined;
+        const zon = try std.zon.parse.fromSlice(
+            struct { minimum_zig_version: []const u8 },
+            .{
+                .gpa = allocator,
+                .arena = arena.allocator(),
+                .source = text,
+                .diagnostics = &diag,
+                .ignore_unknown_fields = true,
+            },
+        );
+        break :ver try allocator.dupe(u8, zon.minimum_zig_version);
+    };
+    errdefer allocator.free(zig_version);
 
-    return SemverString.parse(zon.minimum_zig_version) catch return error.ParseZon;
+    return SemverString.parse(zig_version) catch return error.ParseZon;
 }
 
 /// Returns the requested zig version based on `build.zig.zon` in the current directory or any parent directories.

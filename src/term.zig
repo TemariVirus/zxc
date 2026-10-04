@@ -77,7 +77,7 @@ pub fn erase(stdout: *Writer, mode: enum(u8) {
     screen = 2,
     all = 3,
 }) !void {
-    try stdout.print(CSI ++ "{d}J", .{@intFromEnum(mode)});
+    try stdout.print(CSI ++ "{d}J", .{@backingInt(mode)});
 }
 
 /// Resets cursor position to the start of the current line.

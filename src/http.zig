@@ -38,7 +38,7 @@ pub fn fetch(client: *Client, uri: std.Uri) !*FetchResult {
     errdefer client.allocator.destroy(result);
 
     result.request = try client.request(.GET, uri, .{
-        .redirect_behavior = @enumFromInt(3),
+        .redirect_behavior = @fromBackingInt(3),
         .headers = .{
             .user_agent = .{ .override = std.fmt.comptimePrint("{s}/{s}", .{ NAME, options.version }) },
         },

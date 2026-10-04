@@ -60,7 +60,7 @@ pub fn tryLock(allocator: Allocator, io: Io, dir: Dir, key: []const u8) !LockFil
 }
 
 pub fn unlock(self: LockFile, allocator: Allocator, io: Io) void {
-    switch (builtin.os.tag) {
+    switch (builtin.target.os.tag) {
         .windows => {
             // Windows cannot delete the file while there is an open handle
             self.file.close(io);

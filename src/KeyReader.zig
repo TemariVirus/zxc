@@ -32,10 +32,10 @@ pub fn init() !KeyReader {
     new_termios.lflag.ICANON = false; // Disable line buffering
     new_termios.lflag.ECHO = false; // Don't echo input
     new_termios.lflag.ISIG = false; // Disable ctrl+c and ctrl+z signals
-    new_termios.cc[@intFromEnum(posix.V.MIN)] = 0; // Block until we can read a byte
+    new_termios.cc[@backingInt(posix.V.MIN)] = 0; // Block until we can read a byte
     // TODO: this is not foolproof and will not work if the user presses keys fast enough
     // Timeout after 0.1s, to differentiate the escape key from escape sequences
-    new_termios.cc[@intFromEnum(posix.V.TIME)] = 1;
+    new_termios.cc[@backingInt(posix.V.TIME)] = 1;
     try posix.tcsetattr(stdin.handle, .FLUSH, new_termios);
 
     return KeyReader{
@@ -79,7 +79,7 @@ pub fn read(self: *KeyReader, io: std.Io) !Key {
         .empty => switch (try self.takeByte(io)) {
             0x03 => return .sigint,
             0x1b => continue :loop .esc,
-            '\n', 'j', 'k', 's', 'w' => |b| return @enumFromInt(b),
+            '\n', 'j', 'k', 's', 'w' => |b| return @fromBackingInt(b),
             // This also means CSI apparently? I've never obsevered it myself though
             0x9b => continue :loop .csi,
             else => continue :loop .empty,
