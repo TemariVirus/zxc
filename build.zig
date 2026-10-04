@@ -10,9 +10,8 @@ pub fn build(b: *std.Build) !void {
     inline for ([_]std.Target.Query{
         .{ .cpu_arch = .aarch64, .os_tag = .linux, .cpu_model = .baseline },
         .{ .cpu_arch = .x86_64, .os_tag = .linux, .cpu_model = .baseline },
-        // Fails to fetch the index in my macos VM with error.CertificateBundleLoadFailure
-        // .{ .cpu_arch = .aarch64, .os_tag = .macos, .cpu_model = .baseline },
-        // .{ .cpu_arch = .x86_64, .os_tag = .macos, .cpu_model = .baseline },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos, .cpu_model = .baseline },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos, .cpu_model = .baseline },
     }) |tq| {
         try installExes(
             b,
