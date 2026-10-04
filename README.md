@@ -15,7 +15,7 @@ Features:
 
 ## Installation
 
-Download the `zig` and `zxc` binaries from the [releases](https://codeberg.org/TemariVirus/zxc/releases/latest) page. That's it.
+Download the appropriate `*-zxc` file from the [releases](https://codeberg.org/TemariVirus/zxc/releases/latest) page. Unzip the file and you can start using the `zig` and `zxc` binaries inside.
 
 For convenience, you probably also want to move the binaries to somewhere inside your PATH.
 
