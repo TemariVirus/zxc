@@ -894,3 +894,80 @@ pub fn resolveFromInstalledZigVersion(
     }
     return null;
 }
+
+const testing = std.testing;
+
+test "isZigVersionCompatible post 1.0" {
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 1, .minor = 2, .patch = 3 },
+        .{ .major = 1, .minor = 2, .patch = 3 },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 1, .minor = 2, .patch = 3 },
+        .{ .major = 1, .minor = 2, .patch = 69 },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 1, .minor = 2, .patch = 3 },
+        .{ .major = 1, .minor = 2, .patch = 3, .build = "123" },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 1, .minor = 2, .patch = 3 },
+        .{ .major = 1, .minor = 2, .patch = 3, .pre = "rc1" },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 1, .minor = 2, .patch = 3 },
+        .{ .major = 1, .minor = 2, .patch = 4, .pre = "rc1" },
+    ));
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 1, .minor = 3, .patch = 0 },
+        .{ .major = 1, .minor = 2, .patch = 69 },
+    ));
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 1, .minor = 2, .patch = 0 },
+        .{ .major = 2, .minor = 2, .patch = 69 },
+    ));
+}
+
+test "isZigVersionCompatible 0.x.y" {
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3 },
+        .{ .major = 0, .minor = 2, .patch = 3 },
+    ));
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3 },
+        .{ .major = 0, .minor = 2, .patch = 4 },
+    ));
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3 },
+        .{ .major = 0, .minor = 3, .patch = 3 },
+    ));
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3 },
+        .{ .major = 1, .minor = 2, .patch = 3 },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3 },
+        .{ .major = 0, .minor = 2, .patch = 3, .build = "023" },
+    ));
+
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3 },
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1" },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1" },
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1" },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1" },
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc2" },
+    ));
+    try testing.expect(isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1", .build = "023" },
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1" },
+    ));
+    try testing.expect(!isZigVersionCompatible(
+        .{ .major = 0, .minor = 2, .patch = 4, .pre = "rc1" },
+        .{ .major = 0, .minor = 2, .patch = 3, .pre = "rc1" },
+    ));
+}

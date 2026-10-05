@@ -10,6 +10,21 @@ pub fn build(b: *Build) !void {
     b.installArtifact(zig_exe);
     b.installArtifact(zxc_exe);
 
+    const test_step = b.step("test", "Run tests");
+    const test_exe = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const test_options = b.addOptions();
+    test_options.addOptionPath("zig_path", zig_exe.getEmittedBin());
+    test_options.addOptionPath("zxc_path", zxc_exe.getEmittedBin());
+    test_exe.root_module.addImport("options", test_options.createModule());
+    const run_test = b.addRunArtifact(test_exe);
+    test_step.dependOn(&run_test.step);
+
     const release_step = b.step("release", "Compile release binaries");
     inline for ([_]std.Target.Query{
         .{ .cpu_arch = .aarch64, .os_tag = .linux, .cpu_model = .baseline },
