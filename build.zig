@@ -1,10 +1,14 @@
 const std = @import("std");
+const Build = std.Build;
 
-pub fn build(b: *std.Build) !void {
+pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    try installExes(b, "bin", target, optimize, b.getInstallStep());
+    // Default install step
+    const zig_exe, const zxc_exe = try buildExes(b, target, optimize);
+    b.installArtifact(zig_exe);
+    b.installArtifact(zxc_exe);
 
     const release_step = b.step("release", "Compile release binaries");
     inline for ([_]std.Target.Query{
@@ -13,13 +17,7 @@ pub fn build(b: *std.Build) !void {
         .{ .cpu_arch = .aarch64, .os_tag = .macos, .cpu_model = .baseline },
         .{ .cpu_arch = .x86_64, .os_tag = .macos, .cpu_model = .baseline },
     }) |tq| {
-        try installExes(
-            b,
-            std.fmt.comptimePrint("release/{t}-{t}", .{ tq.cpu_arch.?, tq.os_tag.? }),
-            b.resolveTargetQuery(tq),
-            .small,
-            release_step,
-        );
+        try installReleaseArtifact(b, b.resolveTargetQuery(tq), release_step);
     }
 }
 
@@ -38,13 +36,11 @@ fn getOwnVersion(allocator: std.mem.Allocator) ![]const u8 {
     return zon.version;
 }
 
-fn installExes(
-    b: *std.Build,
-    comptime folder: []const u8,
-    target: std.Build.ResolvedTarget,
+fn buildExes(
+    b: *Build,
+    target: Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-    step: *std.Build.Step,
-) !void {
+) !struct { *Build.Step.Compile, *Build.Step.Compile } {
     const strip = switch (optimize) {
         .debug, .safe => false,
         .fast, .small => true,
@@ -98,12 +94,21 @@ fn installExes(
     zig_exe.root_module.addImport("options", options.createModule());
     zxc_exe.root_module.addImport("options", options.createModule());
 
-    step.dependOn(&b.addInstallArtifact(zig_exe, .{
-        .dest_dir = .{ .override = .{ .custom = folder } },
-        .dest_sub_path = "zig",
-    }).step);
-    step.dependOn(&b.addInstallArtifact(zxc_exe, .{
-        .dest_dir = .{ .override = .{ .custom = folder } },
-        .dest_sub_path = "zxc",
-    }).step);
+    return .{ zig_exe, zxc_exe };
+}
+
+fn installReleaseArtifact(b: *Build, target: Build.ResolvedTarget, step: *Build.Step) !void {
+    const zig_exe, const zxc_exe = try buildExes(b, target, .small);
+    const archive_path = b.fmt(
+        "release/{t}-{t}-zxc",
+        .{ target.result.cpu.arch, target.result.os.tag },
+    );
+    step.dependOn(&b.addInstallArtifact(
+        zig_exe,
+        .{ .dest_dir = .{ .override = .{ .custom = archive_path } } },
+    ).step);
+    step.dependOn(&b.addInstallArtifact(
+        zxc_exe,
+        .{ .dest_dir = .{ .override = .{ .custom = archive_path } } },
+    ).step);
 }
