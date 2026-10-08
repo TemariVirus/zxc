@@ -86,6 +86,7 @@ fn buildExes(
     const minizign = b.dependency("minizign", .{
         .target = target,
         .optimize = optimize,
+        .@"no-cli" = true,
     }).module("minizign");
     zig_exe.root_module.addImport("minizign", minizign);
 
