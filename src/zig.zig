@@ -14,21 +14,11 @@ const fs = @import("fs.zig");
 const http = @import("http.zig");
 const pv_store = @import("path_version_store.zig");
 const term = @import("term.zig");
+const EnvVar = @import("EnvVar.zig");
 
 const SAFETY_ON = switch (builtin.optimize) {
     .debug, .safe => true,
     .fast, .small => false,
-};
-
-const EnvVars = struct {
-    pub const FORCE_ZIG_VERSION = "ZXC_FORCE_ZIG_VERSION";
-    // Only used when non-interactive
-    pub const ALWAYS_INSTALL = "ZXC_ALWAYS_INSTALL";
-
-    pub fn getNonEmpty(env_map: *const EnvMap, key: []const u8) ?[]const u8 {
-        const value = env_map.get(key) orelse return null;
-        return if (value.len == 0) null else value;
-    }
 };
 
 const WantedZig = struct {
@@ -236,7 +226,7 @@ fn selectVersionMenu(
 fn getWantedZig(allocator: Allocator, g: *files.Globals) ?WantedZig {
     const io = g.getIo();
 
-    if (EnvVars.getNonEmpty(g.env_map, EnvVars.FORCE_ZIG_VERSION)) |v| {
+    if (EnvVar.getNonEmpty(g.env_map, .FORCE_ZIG_VERSION)) |v| {
         const version_string = allocator.dupe(u8, v) catch fatal("Out of memory.", .{});
         return .{
             .version = .parseOrCrash(version_string),
@@ -283,7 +273,7 @@ fn getWantedZig(allocator: Allocator, g: *files.Globals) ?WantedZig {
     if (!term.isInteractive()) {
         fatal(
             "Set the envivonment variable {s} or run `zig` to select a version first.",
-            .{EnvVars.FORCE_ZIG_VERSION},
+            .{EnvVar.FORCE_ZIG_VERSION.name},
         );
     }
 
@@ -482,12 +472,12 @@ pub fn main(init: std.process.Init.Minimal) void {
                 error.EndOfStream => err,
                 error.ReadFailed => stdin.err.?,
             }})
-        else if (EnvVars.getNonEmpty(&env_map, EnvVars.ALWAYS_INSTALL) == null)
+        else if (EnvVar.getNonEmpty(&env_map, .ALWAYS_INSTALL) == null)
             fatal(
                 \\Zig version {s} is not installed.
                 \\Non-interactive mode requires the environment variable {s} to be non-empty to automatically install new versions.
             ,
-                .{ info.resolved.name(), EnvVars.ALWAYS_INSTALL },
+                .{ info.resolved.name(), EnvVar.ALWAYS_INSTALL.name },
             )
         else
             true;
