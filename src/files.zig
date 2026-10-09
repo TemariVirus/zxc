@@ -10,6 +10,7 @@ const fatal = std.process.fatal;
 const builtin = @import("builtin");
 const known_folders = @import("known-folders");
 
+const EnvVar = @import("EnvVar.zig");
 const LockFile = @import("LockFile.zig");
 const fs = @import("fs.zig");
 const http = @import("http.zig");
@@ -267,6 +268,14 @@ pub const Globals = struct {
 };
 
 pub fn getBasePath(io: Io, env_map: *const EnvMap, buf: []u8) ![]u8 {
+    if (EnvVar.getNonEmpty(env_map, .BASE_DIR)) |base_path| {
+        if (base_path.len > buf.len) {
+            return error.OutOfMemory;
+        }
+        @memcpy(buf[0..base_path.len], base_path);
+        return buf[0..base_path.len];
+    }
+
     var fba: std.heap.FixedBufferAllocator = .init(buf);
     const cache_path = try known_folders.getPath(
         io,

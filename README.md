@@ -47,6 +47,7 @@ More detailed help can be viewed by running `zxc --help`.
 
 Several environment variables affect zxc:
 
+- `ZXC_BASE_DIR` - If non-empty, zxc will store all its data in this directory.
 - `ZXC_FORCE_ZIG_VERSION` - If non-empty, this Zig version is always used regardless of `build.zig.zon`. Good for pinning Zig versions in scripts.
   Not recommended to set it to "master" as the "master" version is always changing.
 - `ZXC_ALWAYS_INSTALL` - If non-empty, Zig versions are always installed when needed. Ignored when running `zig` from the CLI (answer those prompts!).
