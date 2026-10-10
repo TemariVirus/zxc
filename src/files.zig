@@ -25,6 +25,7 @@ pub const ZIG_NAME = switch (builtin.target.os.tag) {
 
 pub const BASE_DIR = "zxc";
 pub const VERSIONS_DIR = "versions";
+pub const INDEX_PATH = "index.json";
 /// The index is validated using a scanner with this stack size.
 /// Thus, any scanners using this stack size will never return an error when
 /// parsing the index.
@@ -170,11 +171,13 @@ pub const IndexIterator = struct {
                     else => return Error.UnexpectedFormat,
                 }
                 // "version" is always the first key if it exists
+                const object_begin_scanner = self.scanner;
                 const version = json.parseValueIfEqlKey([]const u8, &self.scanner, "version") catch |err| switch (err) {
                     error.NoMoreKeys => continue,
                     error.UnexpectedToken => return Error.UnexpectedFormat,
                     else => unreachable,
                 };
+                self.scanner = object_begin_scanner;
                 json.skipToKey(&self.scanner, SELF_TARGET) catch |err| switch (err) {
                     error.NoMoreKeys => continue,
                     else => unreachable,
@@ -413,7 +416,7 @@ pub fn getIndexNoCache(allocator: Allocator, client: *std.http.Client, base_dir:
             .allocator = allocator,
             .client = client,
             .base_dir = base_dir,
-            .base_path = "index.json",
+            .base_path = INDEX_PATH,
             .file_expiry = .fromNanoseconds(1 * std.time.ns_per_day),
             .fetch_uri = INDEX_URI,
         },
