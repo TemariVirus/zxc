@@ -307,9 +307,8 @@ fn resolveZigVersion(
         error.UnexpectedFormat => fatal("Unexpected format for index file. Please update your zxc version.", .{}),
     } orelse {
         switch (wanted.source) {
+            .force, .build_zig_zon => {},
             .pv_store => if (enable_user_input) |_| return null,
-            .build_zig_zon => {},
-            .force => unreachable,
         }
         if (files.getPatchCompatibleZigVersion(g.getIndex(), wanted.version) catch unreachable) |version| {
             fatal("No available Zig version is compatible with {s}. Did you mean {s}?", .{ wanted.version.name(), version });
