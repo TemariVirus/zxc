@@ -280,7 +280,7 @@ fn getWantedZig(allocator: Allocator, g: *files.Globals) ?WantedZig {
         log.err("Failed to get previously selected version: {t}", .{err});
     }
 
-    if (!term.isInteractive()) {
+    if (!term.isInteractive(io)) {
         fatal(
             "Set the envivonment variable {s} or run `zig` to select a version first.",
             .{EnvVars.FORCE_ZIG_VERSION},
@@ -471,7 +471,7 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     var confirmed_install = info.used_user_input;
     if (!info.installed and !confirmed_install) {
-        confirmed_install = if (term.isInteractive())
+        confirmed_install = if (term.isInteractive(io))
             confirmInstallPrompt(
                 g.getIndex(),
                 info.wanted.name(),

@@ -94,40 +94,13 @@ pub fn setCursorVisibility(writer: *Writer, show: bool) !void {
     }
 }
 
-pub fn isatty(fd: std.posix.fd_t) error{ FileNotOpen, Unexpected }!bool {
-    switch (builtin.target.os.tag) {
-        .linux => return try isattyLinux(fd),
-        else => {
-            // TODO: implementations for MacOS and Windows that do not rely on libc
-            const E = std.c.E;
-            const rc = std.c.isatty(fd);
-            return switch (std.c.errno(rc)) {
-                E.SUCCESS => true,
-                E.NOTTY => false,
-                E.BADF => error.FileNotOpen,
-                else => error.Unexpected,
-            };
-        },
-    }
-}
-
-fn isattyLinux(fd: std.posix.fd_t) error{ FileNotOpen, Unexpected }!bool {
-    const E = posix.E;
-
-    var tmp: posix.winsize = undefined;
-    const rc = linux.ioctl(fd, posix.T.IOCGWINSZ, @intFromPtr(&tmp));
-    switch (posix.errno(rc)) {
-        E.SUCCESS => return true,
-        E.NOTTY => return false,
-        E.BADF => return error.FileNotOpen,
-        else => return error.Unexpected,
-    }
+pub fn isatty(io: std.Io, file: std.Io.File) std.Io.Cancelable!bool {
+    return try file.isTty(io);
 }
 
 /// Can the user access stdin and stdout, to use an interactive TUI?
-pub fn isInteractive() bool {
-    const File = std.Io.File;
-    const interactive_stdin = isatty(File.stdin().handle) catch return false;
-    const interactive_stdout = isatty(File.stdout().handle) catch return false;
+pub fn isInteractive(io: std.Io) bool {
+    const interactive_stdin = isatty(io, .stdin()) catch return false;
+    const interactive_stdout = isatty(io, .stdout()) catch return false;
     return interactive_stdin and interactive_stdout;
 }
