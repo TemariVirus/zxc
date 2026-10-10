@@ -1,5 +1,4 @@
-const std = @import("std");
-
-test "Unit tests" {
+test {
     _ = @import("files.zig");
+    _ = @import("test/integration.zig");
 }
