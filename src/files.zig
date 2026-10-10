@@ -275,6 +275,9 @@ pub fn getBasePath(io: Io, env_map: *const EnvMap, buf: []u8) ![]u8 {
         if (base_path.len > buf.len) {
             return error.OutOfMemory;
         }
+        if (!Dir.path.isAbsolute(base_path)) {
+            return error.BaseDirNotAbsolute;
+        }
         @memcpy(buf[0..base_path.len], base_path);
         return buf[0..base_path.len];
     }
