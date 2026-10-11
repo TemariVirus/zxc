@@ -8,6 +8,11 @@ const Container = @import("Container.zig");
 const EnvVar = @import("../EnvVar.zig");
 const files = @import("../files.zig");
 
+pub const RUN_INTEGRATION_TESTS = switch (@import("builtin").target.os.tag) {
+    .linux => true,
+    else => false,
+};
+
 /// Testing-only container-like environment. The filesystem root is mounted
 /// onto a temporary directory and network access is disabled.
 const Jail = struct {
@@ -188,6 +193,9 @@ fn fmtIndex(versions: []const []const u8) IndexFormatter {
 
 test "FORCE_ZIG_VERSION env var" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
@@ -208,6 +216,9 @@ test "FORCE_ZIG_VERSION env var" {
 
 test ".minimum_zig_version in build.zig.zon" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
@@ -232,6 +243,9 @@ test ".minimum_zig_version in build.zig.zon" {
 
 test "cwd command" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
@@ -288,6 +302,9 @@ test "cwd command" {
 
 test "cwd command fail on .minimum_zig_version" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
@@ -327,6 +344,9 @@ test "cwd command fail on .minimum_zig_version" {
 
 test "install command" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
@@ -372,6 +392,9 @@ test "install command" {
 
 test "ls command" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
@@ -429,6 +452,9 @@ test "ls command" {
 
 test "rm command" {
     const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
 
     var jail: Jail = .init();
     defer jail.deinit();
