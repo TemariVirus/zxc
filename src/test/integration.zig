@@ -63,11 +63,21 @@ const Jail = struct {
     pub fn printFile(
         self: Jail,
         dst_path: []const u8,
+        permissions: std.Io.File.Permissions,
         comptime fmt: []const u8,
         args: anytype,
     ) void {
-        const f = self.tmp.dir.createFile(io, dst_path, .{ .truncate = true }) catch
-            std.debug.panic("Failed to create {s} in jail", .{dst_path});
+        if (Dir.path.dirname(dst_path)) |dir_name| {
+            self.tmp.dir.createDirPath(io, dir_name) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => std.debug.panic("Failed to create {s} dir in jail", .{dir_name}),
+            };
+        }
+        const f = self.tmp.dir.createFile(
+            io,
+            dst_path,
+            .{ .truncate = true, .permissions = permissions },
+        ) catch std.debug.panic("Failed to create {s} in jail", .{dst_path});
         defer f.close(io);
 
         var buf: [4096]u8 = undefined;
@@ -182,7 +192,7 @@ test "FORCE_ZIG_VERSION env var" {
     var jail: Jail = .init();
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
-    jail.printFile(files.INDEX_PATH, "{f}", .{
+    jail.printFile(files.INDEX_PATH, .default_file, "{f}", .{
         fmtIndex(&.{"3.2.1"}),
     });
     try jail.env.put(EnvVar.BASE_DIR.name, "/");
@@ -202,10 +212,10 @@ test ".minimum_zig_version in build.zig.zon" {
     var jail: Jail = .init();
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
-    jail.printFile(files.INDEX_PATH, "{f}", .{
+    jail.printFile(files.INDEX_PATH, .default_file, "{f}", .{
         fmtIndex(&.{"2.3.4"}),
     });
-    jail.printFile("build.zig.zon",
+    jail.printFile("build.zig.zon", .default_file,
         \\.{{
         \\    .minimum_zig_version = "2.3.4",
         \\}}
@@ -226,7 +236,7 @@ test "cwd command" {
     var jail: Jail = .init();
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
-    jail.printFile(files.INDEX_PATH, "{f}", .{
+    jail.printFile(files.INDEX_PATH, .default_file, "{f}", .{
         fmtIndex(&.{ "1.2.3", "1.2.3", "2.0.0" }),
     });
     try jail.env.put(EnvVar.BASE_DIR.name, "/");
@@ -282,7 +292,7 @@ test "cwd command fail on .minimum_zig_version" {
     var jail: Jail = .init();
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
-    jail.printFile("build.zig.zon",
+    jail.printFile("build.zig.zon", .default_file,
         \\.{{
         \\    .minimum_zig_version = "2.3.4",
         \\}}
@@ -295,10 +305,10 @@ test "cwd command fail on .minimum_zig_version" {
         try run.expectTerm(.{ .exited = 1 });
     }
 
-    jail.printFile(files.INDEX_PATH, "{f}", .{
+    jail.printFile(files.INDEX_PATH, .default_file, "{f}", .{
         fmtIndex(&.{"2.3.4"}),
     });
-    jail.printFile("build.zig.zon",
+    jail.printFile("build.zig.zon", .default_file,
         \\.{{
         \\}}
     , .{});
@@ -312,5 +322,166 @@ test "cwd command fail on .minimum_zig_version" {
         defer run.deinit();
         try run.expectTerm(.{ .exited = 0 });
         try run.expectVersionStdout("2.3.4");
+    }
+}
+
+test "install command" {
+    const gpa = testing.allocator;
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile("test/zig", .executable_file, "", .{});
+    jail.printFile("test.tar.xz", .default_file, "{s}", .{@embedFile("test.tar.xz")});
+    try jail.env.put(EnvVar.BASE_DIR.name, "/zxc-data");
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "1.2.3", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings("1.2.3\n", run.stdout);
+    }
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "1.2.3", "test.tar.xz" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 1 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "-f", "1.2.3", "test.tar.xz" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "-f", "invalid", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 1 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings("1.2.3\n", run.stdout);
+    }
+}
+
+test "ls command" {
+    const gpa = testing.allocator;
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile("zxc-data/" ++ files.INDEX_PATH, .default_file, "{f}", .{
+        fmtIndex(&.{ "0.16.0", "1.0.0", "1.2.3", "1.2.5-dev.146+35accc06e" }),
+    });
+    jail.printFile("test/zig", .executable_file, "", .{});
+    try jail.env.put(EnvVar.BASE_DIR.name, "/zxc-data");
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings("No Zig versions installed.\n", run.stdout);
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls", "-a" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings(
+            \\1.2.5-dev.146+35accc06e
+            \\1.2.3
+            \\1.0.0
+            \\0.16.0
+            \\
+        , run.stdout);
+    }
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "3.2.1-test", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings("3.2.1-test\n", run.stdout);
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls", "-a" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings(
+            \\3.2.1-test [Installed]
+            \\1.2.5-dev.146+35accc06e
+            \\1.2.3
+            \\1.0.0
+            \\0.16.0
+            \\
+        , run.stdout);
+    }
+}
+
+test "rm command" {
+    const gpa = testing.allocator;
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile("test/zig", .executable_file, "", .{});
+    try jail.env.put(EnvVar.BASE_DIR.name, "/zxc-data");
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "1.1.1", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "2.2.2", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "3.3.3", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings(
+            \\3.3.3
+            \\2.2.2
+            \\1.1.1
+            \\
+        , run.stdout);
+    }
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "rm", "2.2.2" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings(
+            \\3.3.3
+            \\1.1.1
+            \\
+        , run.stdout);
+    }
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "rm", "not-installed", "also.not.installed" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
     }
 }
