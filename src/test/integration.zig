@@ -33,6 +33,15 @@ const Jail = struct {
     /// Copies the file at `src_path` into the Jail environment.
     /// Tries to hardlink when possible.
     pub fn linkFile(self: Jail, src_path: []const u8, dst_path: []const u8) void {
+        // Delete so we can hardlink
+        self.tmp.dir.deleteFile(io, dst_path) catch {};
+
+        if (Dir.path.dirname(dst_path)) |dir_name| {
+            self.tmp.dir.createDirPath(io, dir_name) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => std.debug.panic("Failed to create {s} dir in jail", .{dir_name}),
+            };
+        }
         Dir.hardLink(
             .cwd(),
             src_path,
@@ -46,18 +55,18 @@ const Jail = struct {
             self.tmp.dir,
             dst_path,
             io,
-            .{ .make_path = true, .replace = false },
+            .{ .replace = true },
         ) catch std.debug.panic("Failed to copy {s} to {s} in jail", .{ src_path, dst_path });
     }
 
-    /// Creates a new file in the Jail environment.
+    /// Creates or overwrites a file in the Jail environment.
     pub fn printFile(
         self: Jail,
         dst_path: []const u8,
         comptime fmt: []const u8,
         args: anytype,
     ) void {
-        const f = self.tmp.dir.createFile(io, dst_path, .{ .exclusive = true }) catch
+        const f = self.tmp.dir.createFile(io, dst_path, .{ .truncate = true }) catch
             std.debug.panic("Failed to create {s} in jail", .{dst_path});
         defer f.close(io);
 
@@ -139,19 +148,87 @@ const Run = struct {
     }
 };
 
+const IndexFormatter = struct {
+    versions: []const []const u8,
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        var s = std.json.Stringify{
+            .writer = writer,
+            .options = .{ .whitespace = .indent_2 },
+        };
+
+        try s.beginObject();
+        for (self.versions) |v| {
+            try s.objectField(v);
+            try s.beginObject();
+            {
+                try s.objectField(files.SELF_TARGET);
+                try s.beginObject();
+                try s.endObject();
+            }
+            try s.endObject();
+        }
+        try s.endObject();
+    }
+};
+
+fn fmtIndex(versions: []const []const u8) IndexFormatter {
+    return .{ .versions = versions };
+}
+
+test "FORCE_ZIG_VERSION env var" {
+    const gpa = testing.allocator;
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile(files.INDEX_PATH, "{f}", .{
+        fmtIndex(&.{"3.2.1"}),
+    });
+    try jail.env.put(EnvVar.BASE_DIR.name, "/");
+
+    {
+        try jail.env.put(EnvVar.FORCE_ZIG_VERSION.name, "3.2.1");
+        const run = try jail.run(gpa, &.{ "zxc", "realpath" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try run.expectVersionStdout("3.2.1");
+    }
+}
+
+test ".minimum_zig_version in build.zig.zon" {
+    const gpa = testing.allocator;
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile(files.INDEX_PATH, "{f}", .{
+        fmtIndex(&.{"2.3.4"}),
+    });
+    jail.printFile("build.zig.zon",
+        \\.{{
+        \\    .minimum_zig_version = "2.3.4",
+        \\}}
+    , .{});
+    try jail.env.put(EnvVar.BASE_DIR.name, "/");
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "realpath" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try run.expectVersionStdout("2.3.4");
+    }
+}
+
 test "cwd command" {
     const gpa = testing.allocator;
 
     var jail: Jail = .init();
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
-    jail.printFile(files.INDEX_PATH,
-        \\{{
-        \\  "1.2.3": {{
-        \\    "{s}": {{}}
-        \\  }}
-        \\}}
-    , .{files.SELF_TARGET});
+    jail.printFile(files.INDEX_PATH, "{f}", .{
+        fmtIndex(&.{ "1.2.3", "1.2.3", "2.0.0" }),
+    });
     try jail.env.put(EnvVar.BASE_DIR.name, "/");
 
     {
@@ -169,5 +246,71 @@ test "cwd command" {
         defer run.deinit();
         try run.expectTerm(.{ .exited = 0 });
         try run.expectVersionStdout("1.2.3");
+    }
+
+    // Idempotency
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "1.2.3" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "realpath" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try run.expectVersionStdout("1.2.3");
+    }
+
+    // Overwrite version
+    {
+        // Patch-compatible 2.0.0 will be used instead
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "2.0.1" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "realpath" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try run.expectVersionStdout("2.0.0");
+    }
+}
+
+test "cwd command fail on .minimum_zig_version" {
+    const gpa = testing.allocator;
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile("build.zig.zon",
+        \\.{{
+        \\    .minimum_zig_version = "2.3.4",
+        \\}}
+    , .{});
+    try jail.env.put(EnvVar.BASE_DIR.name, "/");
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "2.3.4" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 1 });
+    }
+
+    jail.printFile(files.INDEX_PATH, "{f}", .{
+        fmtIndex(&.{"2.3.4"}),
+    });
+    jail.printFile("build.zig.zon",
+        \\.{{
+        \\}}
+    , .{});
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "2.3.4" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "realpath" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try run.expectVersionStdout("2.3.4");
     }
 }

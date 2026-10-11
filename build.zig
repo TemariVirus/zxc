@@ -19,7 +19,6 @@ pub fn build(b: *Build) !void {
         }),
     });
     const test_options = b.addOptions();
-    test_options.addOptionPath("zig_path", zig_exe.getEmittedBin());
     test_options.addOptionPath("zxc_path", zxc_exe.getEmittedBin());
     test_exe.root_module.addImport("options", test_options.createModule());
     const run_test = b.addRunArtifact(test_exe);
