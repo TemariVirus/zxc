@@ -89,7 +89,7 @@ pub const Version = union(enum) {
     }
 
     pub fn parseOrCrash(str: []const u8) Version {
-        return parse(str) catch fatal("Zig version cannot start with 'lock.'", .{});
+        return parse(str) catch fatal("Zig version cannot start with 'lock.' or contain path seperators.", .{});
     }
 
     /// The name of the folder that will store this version when installed.

@@ -38,6 +38,9 @@ const Jail = struct {
     /// Copies the file at `src_path` into the Jail environment.
     /// Tries to hardlink when possible.
     pub fn linkFile(self: Jail, src_path: []const u8, dst_path: []const u8) void {
+        if (Dir.path.isAbsolute(dst_path)) {
+            @panic("dst_path must be relative to the Jail's root");
+        }
         // Delete so we can hardlink
         self.tmp.dir.deleteFile(io, dst_path) catch {};
 
@@ -72,6 +75,10 @@ const Jail = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) void {
+        if (Dir.path.isAbsolute(dst_path)) {
+            @panic("dst_path must be relative to the Jail's root");
+        }
+
         if (Dir.path.dirname(dst_path)) |dir_name| {
             self.tmp.dir.createDirPath(io, dir_name) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
@@ -176,6 +183,13 @@ const IndexFormatter = struct {
         for (self.versions) |v| {
             try s.objectField(v);
             try s.beginObject();
+            if (std.SemanticVersion.parse(v)) |_| {
+                try s.objectField("version");
+                try s.write(v);
+            } else |_| {
+                try s.objectField("version");
+                try s.write("1.2.3-master");
+            }
             {
                 try s.objectField(files.SELF_TARGET);
                 try s.beginObject();
@@ -251,7 +265,7 @@ test "cwd command" {
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
     jail.printFile(files.INDEX_PATH, .default_file, "{f}", .{
-        fmtIndex(&.{ "1.2.3", "1.2.3", "2.0.0" }),
+        fmtIndex(&.{ "1.2.3", "1.2.3", "2.0.0", "master" }),
     });
     try jail.env.put(EnvVar.BASE_DIR.name, "/");
 
@@ -297,6 +311,19 @@ test "cwd command" {
         defer run.deinit();
         try run.expectTerm(.{ .exited = 0 });
         try run.expectVersionStdout("2.0.0");
+    }
+
+    // Non-semver version
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "master" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "realpath" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try run.expectVersionStdout("master");
     }
 }
 
@@ -526,5 +553,57 @@ test "rm command" {
         const run = try jail.run(gpa, &.{ "zxc", "rm", "not-installed", "also.not.installed" });
         defer run.deinit();
         try run.expectTerm(.{ .exited = 0 });
+    }
+}
+
+test "path traversal attacks" {
+    const gpa = testing.allocator;
+    if (!RUN_INTEGRATION_TESTS) {
+        return error.SkipZigTest;
+    }
+
+    var jail: Jail = .init();
+    defer jail.deinit();
+    jail.linkFile(options.zxc_path, "zxc");
+    jail.printFile("a/b/c/" ++ files.INDEX_PATH, .default_file, "{f}", .{
+        fmtIndex(&.{ "../master", "master" }),
+    });
+    jail.printFile("test/zig", .executable_file, "", .{});
+    try jail.env.put(EnvVar.BASE_DIR.name, "/a/b/c");
+
+    // Control
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "master" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    // Attack
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "cwd", "../master" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 1 });
+    }
+
+    // Control
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "i", "-f", "master", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    // Attack
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "i", "-f", "../master", "test" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 1 });
+    }
+
+    // No need for control
+    jail.printFile("a/b/master", .executable_file, "", .{});
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "rm", "../master" });
+        defer run.deinit();
+        // This will only produce a warning
+        try run.expectTerm(.{ .exited = 0 });
+        try jail.tmp.dir.access(testing.io, "a/b/master", .{});
     }
 }

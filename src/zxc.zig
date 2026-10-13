@@ -514,12 +514,12 @@ fn rmCmd(g: *files.Globals, opts: RmArgs) void {
     const versions_dir = g.getBaseDir().createDirPathOpen(io, files.VERSIONS_DIR, .{}) catch |err|
         fatal("Unable to open versions directory: {t}", .{err});
     defer versions_dir.close(io);
-    version_loop: while (opts.nextVersion()) |version| {
+    while (opts.nextVersion()) |version| {
         // Prevent path traversal
-        for (version) |c| if (Dir.path.isSep(c)) {
+        if (!std.mem.eql(u8, version, Dir.path.basename(version))) {
             log.err("Invalid version: {s}", .{version});
-            continue :version_loop;
-        };
+            continue;
+        }
 
         versions_dir.access(io, version, .{}) catch {
             log.info("{s} is not installed", .{version});

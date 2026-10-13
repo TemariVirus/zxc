@@ -216,7 +216,7 @@ fn selectVersionMenu(
         switch (err) {
             error.ReadFailed => fatal("Unable to read user input: {t}", .{kr.getErr()}),
             error.OutOfMemory => fatal("Out of memory.", .{}),
-            error.InvalidVersionName => fatal("Zig version cannot start with 'lock.'", .{}),
+            error.InvalidVersionName => fatal("Zig version cannot start with 'lock.' or contain path seperators.", .{}),
             // Typical for dying by SIGINT
             error.ReceivedSigint => std.process.exit(130),
         }

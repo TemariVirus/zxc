@@ -13,7 +13,7 @@ name: []const u8,
 
 pub fn isValidKey(key: []const u8) bool {
     return !std.mem.startsWith(u8, key, "lock.") and
-        Dir.path.basename(key).len == key.len;
+        std.mem.eql(u8, key, Dir.path.basename(key));
 }
 
 fn getNameFromKey(allocator: Allocator, key: []const u8) Allocator.Error![]const u8 {
