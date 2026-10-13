@@ -352,6 +352,7 @@ test "install command" {
     defer jail.deinit();
     jail.linkFile(options.zxc_path, "zxc");
     jail.printFile("test/zig", .executable_file, "", .{});
+    jail.printFile("test.zip", .default_file, "{s}", .{@embedFile("test.zip")});
     jail.printFile("test.tar.xz", .default_file, "{s}", .{@embedFile("test.tar.xz")});
     try jail.env.put(EnvVar.BASE_DIR.name, "/zxc-data");
 
@@ -387,6 +388,22 @@ test "install command" {
         defer run.deinit();
         try run.expectTerm(.{ .exited = 0 });
         try testing.expectEqualStrings("1.2.3\n", run.stdout);
+    }
+
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "install", "1.2.3-zip", "test.zip" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+    }
+    {
+        const run = try jail.run(gpa, &.{ "zxc", "ls" });
+        defer run.deinit();
+        try run.expectTerm(.{ .exited = 0 });
+        try testing.expectEqualStrings(
+            \\1.2.3
+            \\1.2.3-zip
+            \\
+        , run.stdout);
     }
 }
 

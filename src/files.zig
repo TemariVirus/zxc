@@ -573,7 +573,17 @@ pub fn extractZigTarball(
             defer d.deinit();
             try std.tar.extract(io, dir, &d.reader, .{});
         },
-        .zip => try std.zip.extract(dir, &reader, .{}),
+        .zip => {
+            try std.zip.extract(dir, &reader, .{});
+            var path_buf: [Dir.max_path_bytes]u8 = undefined;
+            const zig_path = std.mem.print(
+                &path_buf,
+                "{f}",
+                .{Dir.path.fmtJoin(&.{ dir_name, ZIG_NAME })},
+            ) catch return error.NameTooLong;
+            // Zip files do not store permission metadata
+            try dir.setFilePermissions(io, zig_path, .executable_file, .{ .follow_symlinks = false });
+        },
     }
     return dir_name;
 }
